@@ -17,6 +17,7 @@ Usage:
     tokenizer = Tokenizer.load(path)
 """
 
+import heapq
 import regex as re
 from collections import Counter, defaultdict
 
@@ -65,9 +66,17 @@ class Tokenizer:
                 pair = (token_tuple[i], token_tuple[i+1])
                 pair_counts[pair] += count
 
+        heap = [(-count, pair) for pair, count in pair_counts.items()]
+        heapq.heapify(heap)
+
         while len(vocab_elems) < vocab_size:
             #1, find the one with max number and break tie with lexicographical greater
-            best_pair, max_count = max(pair_counts.items(), key=lambda item: (item[1], item[0]))
+            while heap:
+                neg_count, best_pair = heapq.heappop(heap)
+                if best_pair in pair_counts and pair_counts[best_pair] == -neg_count:
+                    break
+            else:
+                break
             merges.append(best_pair)
 
             #2, append it at vocab_elements
@@ -93,6 +102,8 @@ class Tokenizer:
                 pair_counts[p] = pair_counts.get(p, 0) + d
                 if pair_counts[p] <= 0:
                     pair_counts.pop(p, None)
+                else:
+                    heapq.heappush(heap, (-pair_counts[p], p))
 
             # Replace old data with the newly merged data for the next loop
             data = new_data

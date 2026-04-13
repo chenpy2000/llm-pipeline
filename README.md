@@ -33,5 +33,4 @@ Training logs, model checkpoints, and run configs are saved to `output/<timestam
 | `transformer.py` | Decoder-only transformer model |
 | `tokenizer.py` | BPE tokenizer (train / encode / decode) |
 | `dataset.py` | `LMDataset` for causal LM windowed samples |
-| `utilities.py` | Shared helper functions |
 | `experiment.py` | Experiment scripts |

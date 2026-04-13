@@ -18,22 +18,22 @@ num_workers = 4
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 5
-VOCAB_SIZE     = 1000
+NUM_DOCS       = 25000
+VOCAB_SIZE     = 4000
 SPECIAL_TOKENS = ["<|endoftext|>"]
 
 # ── Model ─────────────────────────────────────────────────────────────────────
-context_length = 32    # maximum sequence length
-d_model        = 64    # embedding dimension
-d_ff           = 256   # feedforward dimension (convention: 4 * d_model)
-num_heads      = 2     # number of attention heads
+context_length = 256   # maximum sequence length
+d_model        = 128   # embedding dimension
+d_ff           = 512   # feedforward dimension (convention: 4 * d_model)
+num_heads      = 4     # number of attention heads
 num_layers     = 4     # number of transformer layers
 
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 16
 learning_rate  = 1e-3
-eval_interval  = 100   # log every N steps
-early_stop     = 5     # 0 to disable; stop after N evals with no val PPL improvement
+eval_interval  = 1000   # log every N steps
+early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
 
 @torch.no_grad()
 def compute_perplexity(decoderLMmodel, data_loader):
@@ -117,7 +117,7 @@ def main():
     raw_texts = load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS)
 
     print("Loading Tokenizer")
-    tokenizer_path = "tokenizer/tokenizer.json"
+    tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
     if os.path.exists(tokenizer_path):
         tokenizer = Tokenizer.load(tokenizer_path)
         print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")

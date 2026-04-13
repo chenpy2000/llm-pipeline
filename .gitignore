@@ -1,0 +1,13 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environment (uv recreates from uv.lock)
+.venv/
+
+# Data (too large for git, users download via load_data)
+data/
+
+# Trained artifacts
+tokenizer/
+output/

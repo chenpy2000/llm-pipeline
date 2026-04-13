@@ -1,6 +1,10 @@
 # LLM-PIPELINE
 
-A minimal from-scratch decoder-only transformer pipeline: BPE tokenizer → dataset → training → generation.
+A minimal from-scratch decoder-only transformer pipeline: BPE tokenizer → dataset → training → generation, followed by scaling-law experiments.
+
+**Recent fixes:**
+- Replaced naive pair search with `heapq` in `tokenizer.py` for faster BPE training.
+- Switched `dataset.py` from stride-1 sliding window to non-overlapping chunks for efficient teacher forcing.
 
 ## Environment Setup
 

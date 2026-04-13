@@ -16,10 +16,10 @@ class LMDataset(Dataset):
         self.block_size = block_size
 
     def __len__(self):
-        return len(self.token_ids) - self.block_size
+        return (len(self.token_ids) - 1) // self.block_size
 
     def __getitem__(self, idx):
-        x = self.token_ids[idx     : idx + self.block_size]
-        y = self.token_ids[idx + 1 : idx + self.block_size + 1]
+        start = idx * self.block_size
+        x = self.token_ids[start     : start + self.block_size]
+        y = self.token_ids[start + 1 : start + self.block_size + 1]
         return x, y
-    

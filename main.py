@@ -32,7 +32,7 @@ num_layers     = 4     # number of transformer layers
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 16
 learning_rate  = 1e-3
-eval_interval  = 1000   # log every N steps
+eval_interval  = 500   # log every N steps
 early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
 
 @torch.no_grad()

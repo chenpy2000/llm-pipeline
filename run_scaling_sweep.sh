@@ -17,14 +17,6 @@ echo "════════════════════════�
 echo "  Scaling Law Sweep — Environment Setup"
 echo "══════════════════════════════════════════════════"
 
-# Clone repo (skip if already present)
-REPO_DIR="llm-pipeline"
-if [ ! -d "$REPO_DIR" ]; then
-    echo "Cloning repository ..."
-    git clone https://github.com/chenpy2000/llm-pipeline.git "$REPO_DIR"
-fi
-cd "$REPO_DIR"
-
 # Install uv if not present
 if ! command -v uv &> /dev/null; then
     echo "Installing uv ..."

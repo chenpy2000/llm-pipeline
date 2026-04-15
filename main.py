@@ -3,6 +3,7 @@ from torch.utils.data import DataLoader
 import os
 import csv
 import json
+import argparse
 from datetime import datetime
 
 from tokenizer import Tokenizer
@@ -32,7 +33,7 @@ num_layers     = 4     # number of transformer layers
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 16
 learning_rate  = 1e-3
-eval_interval  = 500   # log every N steps
+eval_interval  = 1000  # log every N steps
 early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
 
 @torch.no_grad()
@@ -288,4 +289,21 @@ def main():
 
     
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--d_model",    type=int, default=None)
+    parser.add_argument("--num_layers", type=int, default=None)
+    parser.add_argument("--num_heads",  type=int, default=None)
+    parser.add_argument("--d_ff",       type=int, default=None)
+    parser.add_argument("--num_docs",   type=int, default=None)
+    parser.add_argument("--early_stop", type=int, default=None)
+    args = parser.parse_args()
+
+    # Override globals only if provided
+    if args.d_model    is not None: d_model    = args.d_model
+    if args.num_layers is not None: num_layers = args.num_layers
+    if args.num_heads  is not None: num_heads  = args.num_heads
+    if args.d_ff       is not None: d_ff       = args.d_ff
+    if args.num_docs   is not None: NUM_DOCS   = args.num_docs
+    if args.early_stop is not None: early_stop = args.early_stop
+
     main()

@@ -131,10 +131,22 @@ def main():
     
     corpus = join_documents(raw_texts)
 
-    print("Encoding corpus ...")
-    token_ids = tokenizer.encode(corpus)
+# ── Encode (cached) ──────────────────────────────────────────────────────
+    encoded_dir = "encoded"
+    os.makedirs(encoded_dir, exist_ok=True)
+    encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
+
+    if os.path.exists(encoded_path):
+        print(f"Loading cached tokens from {encoded_path} ...")
+        token_ids = torch.load(encoded_path)
+    else:
+        print("Encoding corpus ...")
+        token_ids = tokenizer.encode(corpus)
+        torch.save(token_ids, encoded_path)
+        print(f"Cached tokens to {encoded_path}")
+
     total_tokens = len(token_ids)
-    print(f"Total tokens: {len(token_ids):,}")
+    print(f"Total tokens: {total_tokens:,}")
 
     # Train/val split (90/10)
     split = int(0.9 * len(token_ids))

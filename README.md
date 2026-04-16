@@ -24,7 +24,7 @@ uv add regex "datasets>=3.0" --index-strategy unsafe-best-match
 ## Run
 
 ```bash
-uv run main.py
+uv run main_local.py
 ```
 
 Run all sweep experiments locally:

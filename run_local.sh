@@ -65,7 +65,7 @@ for cfg in "${CONFIGS[@]}"; do
     echo "  d_model=${D_MODEL} | layers=${N_LAYERS} | heads=${N_HEADS} | d_ff=${D_FF}"
     echo "──────────────────────────────────────────────────"
 
-    uv run python main.py \
+    uv run python main_local.py \
         --d_model    "$D_MODEL" \
         --num_layers "$N_LAYERS" \
         --num_heads  "$N_HEADS" \

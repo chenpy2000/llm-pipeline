@@ -32,9 +32,9 @@ uv pip install regex "datasets>=3.0" --system --index-strategy unsafe-best-match
 # ── Sweep configuration ──────────────────────────────────────────────────────
 # Fixed across all runs:
 #   - NUM_DOCS=150000  (~200M tokens, enough for biggest model)
-#   - context_length=256, vocab_size=4000  (set in main.py defaults)
+#   - context_length=256, vocab_size=4000  (set in main_gpu.py defaults)
 #   - early_stop=5  (train to convergence)
-#   - eval_interval=1000  (set in main.py default)
+#   - eval_interval=1000  (set in main_gpu.py default)
 
 NUM_DOCS=150000
 EARLY_STOP=5
@@ -67,7 +67,7 @@ for cfg in "${CONFIGS[@]}"; do
     echo "  d_model=${D_MODEL} | layers=${N_LAYERS} | heads=${N_HEADS} | d_ff=${D_FF}"
     echo "──────────────────────────────────────────────────"
 
-    uv run python main.py \
+    uv run python main_gpu.py \
         --d_model    "$D_MODEL" \
         --num_layers "$N_LAYERS" \
         --num_heads  "$N_HEADS" \

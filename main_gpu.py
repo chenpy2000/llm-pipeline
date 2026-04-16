@@ -106,6 +106,12 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
 def join_documents(data, special_token="<|endoftext|>"):
     return special_token.join(data) + special_token
 
+def encode_doc(args):
+    text, tokenizer_path, vocab_size = args
+    tok = Tokenizer.load(tokenizer_path)
+    eos_id = tok.bytes_to_id[b"<|endoftext|>"]
+    return tok.encode(text) + [eos_id]
+
 def main():
 
     # ── Timestamp & output dir ────────────────────────────────────────────────
@@ -142,17 +148,15 @@ def main():
     else:
         print("Encoding corpus (parallel) ...")
         from multiprocessing import Pool, cpu_count
-
-        eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
         n_workers = min(cpu_count(), 16)
-
-        def encode_doc(text):
-            return tokenizer.encode(text) + [eos_id]
+        tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
+        work = [(text, tokenizer_path, VOCAB_SIZE) for text in raw_texts]
 
         with Pool(n_workers) as pool:
-            results = pool.map(encode_doc, raw_texts)
+            results = pool.map(encode_doc, work)
 
         token_ids = [tid for doc_ids in results for tid in doc_ids]
+
         torch.save(token_ids, encoded_path)
         print(f"Cached tokens to {encoded_path}")
 

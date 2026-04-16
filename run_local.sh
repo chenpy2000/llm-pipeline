@@ -30,9 +30,9 @@ uv sync
 # ── Sweep configuration ──────────────────────────────────────────────────────
 # Fixed across all runs:
 #   - NUM_DOCS=150000  (~200M tokens, enough for biggest model)
-#   - context_length=256, vocab_size=4000  (set in main.py defaults)
+#   - context_length=256, vocab_size=4000  (set in main_local.py defaults)
 #   - early_stop=5  (train to convergence)
-#   - eval_interval=1000  (set in main.py default)
+#   - eval_interval=1000  (set in main_local.py default)
 
 NUM_DOCS=150000
 EARLY_STOP=5

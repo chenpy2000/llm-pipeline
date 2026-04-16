@@ -27,7 +27,15 @@ if ! command -v uv &> /dev/null; then
 fi
 
 echo "Installing dependencies ..."
-uv pip install torch torchvision --index https://download.pytorch.org/whl/cu128 --system --index-strategy unsafe-best-match
+
+# Check if GPU is Blackwell or newer (5090, B100, B200, etc.) — needs cu128+
+if nvidia-smi --query-gpu=name --format=csv,noheader | grep -qiE "5090|5080|B100|B200"; then
+    echo "Blackwell+ GPU detected — installing PyTorch with cu128 ..."
+    uv pip install torch torchvision --index https://download.pytorch.org/whl/cu128 --system --index-strategy unsafe-best-match
+else
+    echo "Pre-Blackwell GPU detected — using template PyTorch"
+fi
+
 uv pip install regex "datasets>=3.0" --system --index-strategy unsafe-best-match
 
 # ── Sweep configuration ──────────────────────────────────────────────────────

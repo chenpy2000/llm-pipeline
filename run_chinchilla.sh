@@ -41,7 +41,7 @@ uv pip install regex "datasets>=3.0" --system --break-system-packages --index-st
 # If it does, the single-epoch loop will exit early and the run will be invalid.
 # All budgets below stay under 150M for safety.
 
-NUM_DOCS=150000
+NUM_DOCS=1500000
 
 CONFIGS=(
     # ═══ Compute ≈ 3e14 FLOPs ═══

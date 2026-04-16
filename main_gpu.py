@@ -33,7 +33,7 @@ num_layers     = 4     # number of transformer layers
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 128
 learning_rate  = 1e-3
-eval_interval  = 1000  # log every N steps
+eval_interval  = 50    # log every N steps
 early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
 token_budget   = 0     # 0 = disabled (epoch mode), >0 = Chinchilla mode
 
@@ -158,7 +158,8 @@ def main():
     print(f"Total tokens: {total_tokens:,}")
 
     # Train/val split (90/10)
-    split = int(0.9 * len(token_ids))
+    val_tokens = min(1_000_000, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
+    split = len(token_ids) - val_tokens
     train_dataset = LMDataset(token_ids[:split], context_length)
     val_dataset   = LMDataset(token_ids[split:], context_length)
 
@@ -213,7 +214,7 @@ def main():
         step += 1
         tokens_seen += tokens_per_step
         if step % eval_interval == 0:
-            train_ppl = compute_perplexity(model, train_loader)
+            train_ppl = torch.exp(torch.tensor(loss.item())).item()
             val_ppl   = compute_perplexity(model, val_loader)
             current_lr = optimizer.param_groups[0]["lr"]
             print(

@@ -27,7 +27,7 @@ if ! command -v uv &> /dev/null; then
 fi
 
 echo "Installing dependencies ..."
-uv pip install regex "datasets>=3.0" --system
+uv pip install regex "datasets>=3.0" --system --index-strategy unsafe-best-match
 
 # ── Sweep configuration ──────────────────────────────────────────────────────
 # Fixed across all runs:

@@ -27,11 +27,18 @@ uv add regex "datasets>=3.0" --index-strategy unsafe-best-match
 uv run main.py
 ```
 
-On a remote server (vast.ai, TPU, etc.):
+Run all sweep experiments locally:
 
 ```bash
-chmod +x run_scaling_sweep.sh
-./run_scaling_sweep.sh
+chmod +x run_local.sh
+./run_local.sh
+```
+
+On a remote GPU server (vast.ai, Lambda, etc.):
+
+```bash
+chmod +x run_gpu.sh
+./run_gpu.sh
 ```
 
 Training logs, model checkpoints, and run configs are saved to `output/<timestamp>/`.

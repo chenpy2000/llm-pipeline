@@ -6,10 +6,12 @@ set -euo pipefail
 # Measures converged val PPL as a function of model parameters.
 #
 # Usage:
-#   chmod +x run_scaling_sweep.sh
-#   ./run_scaling_sweep.sh
+#   chmod +x run_gpu.sh
+#   ./run_gpu.sh
 #
-# Works on: vast.ai (CUDA), Google TPU (via PyTorch/XLA), local GPU
+# Requires: PyTorch pre-installed
+#   vast.ai: use "PyTorch (Vast)" template
+#   https://hub.docker.com/r/vastai/pytorch/
 # ══════════════════════════════════════════════════════════════════════════════
 
 # ── Environment setup ─────────────────────────────────────────────────────────

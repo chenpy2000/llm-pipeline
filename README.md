@@ -34,7 +34,7 @@ chmod +x run_local.sh
 ./run_local.sh
 ```
 
-On a remote GPU server (vast.ai, Lambda, etc.):
+On a remote GPU server (requires a PyTorch base template, e.g. vast.ai [PyTorch (Vast)](https://hub.docker.com/r/vastai/pytorch/)):
 
 ```bash
 chmod +x run_gpu.sh

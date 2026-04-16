@@ -36,7 +36,7 @@ else
     echo "Pre-Blackwell GPU detected — using template PyTorch"
 fi
 
-uv pip install regex "datasets>=3.0" --system --index-strategy unsafe-best-match
+uv pip install regex "datasets>=3.0" --system --break-system-packages --index-strategy unsafe-best-match
 
 # ── Sweep configuration ──────────────────────────────────────────────────────
 # Fixed across all runs:

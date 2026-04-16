@@ -35,6 +35,7 @@ batch_size     = 16
 learning_rate  = 1e-3
 eval_interval  = 1000  # log every N steps
 early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
+token_budget   = 0     # 0 = disabled (epoch mode), >0 = Chinchilla mode
 
 @torch.no_grad()
 def compute_perplexity(decoderLMmodel, data_loader):
@@ -183,11 +184,15 @@ def main():
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
+    # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
+    total_steps_est = (token_budget // (batch_size * context_length)) if token_budget > 0 else len(train_loader)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps_est, eta_min=learning_rate * 0.1)
+
     # ── Training log CSV ──────────────────────────────────────────────────────
     log_path = os.path.join(run_dir, f"training_log_{timestamp}.csv")
     log_file = open(log_path, "w", newline="")
     log_writer = csv.writer(log_file)
-    log_writer.writerow(["step", "total_steps", "loss", "train_ppl", "val_ppl"])
+    log_writer.writerow(["step", "total_steps", "loss", "train_ppl", "val_ppl", "lr"])
 
     print("Training ...")
     model.train()
@@ -195,18 +200,26 @@ def main():
     best_val_ppl = float("inf")
     no_improve = 0
 
+    tokens_per_step = batch_size * context_length
+    tokens_seen = 0
+
     for xb, yb in train_loader:
         xb, yb = xb.to(device), yb.to(device)
         loss = model(xb, yb)
         optimizer.zero_grad()
         loss.backward()
         optimizer.step()
+        scheduler.step()
         step += 1
+        tokens_seen += tokens_per_step
         if step % eval_interval == 0:
             train_ppl = compute_perplexity(model, train_loader)
             val_ppl   = compute_perplexity(model, val_loader)
+            current_lr = optimizer.param_groups[0]["lr"]
             print(
                 f"Step {step}/{len(train_loader)} | "
+                f"Tokens: {tokens_seen:,} | "
+                f"LR: {current_lr:.2e} | "
                 f"Loss: {loss.item():.4f} | "
                 f"Train PPL: {train_ppl:.2f} | "
                 f"Val PPL: {val_ppl:.2f}"
@@ -214,7 +227,7 @@ def main():
 
             # Log to CSV
             log_writer.writerow([step, len(train_loader), f"{loss.item():.6f}",
-                                 f"{train_ppl:.4f}", f"{val_ppl:.4f}"])
+                                 f"{train_ppl:.4f}", f"{val_ppl:.4f}", f"{current_lr:.6e}"])
             log_file.flush()
 
             # Early Stop configs below
@@ -227,6 +240,10 @@ def main():
             if early_stop > 0 and no_improve >= early_stop:
                 print(f"Early stopping at step {step} (no improvement for {early_stop} evals)")
                 break
+
+        if token_budget > 0 and tokens_seen >= token_budget:
+            print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
+            break
 
     log_file.close()
 
@@ -292,6 +309,8 @@ def main():
             "learning_rate": learning_rate,
             "eval_interval": eval_interval,
             "early_stop": early_stop,
+            "token_budget": token_budget,
+            "tokens_seen": tokens_seen,
             "final_step": step,
             "total_steps": len(train_loader),
             "best_val_ppl": best_val_ppl,
@@ -310,20 +329,22 @@ def main():
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--d_model",    type=int, default=None)
-    parser.add_argument("--num_layers", type=int, default=None)
-    parser.add_argument("--num_heads",  type=int, default=None)
-    parser.add_argument("--d_ff",       type=int, default=None)
-    parser.add_argument("--num_docs",   type=int, default=None)
-    parser.add_argument("--early_stop", type=int, default=None)
+    parser.add_argument("--d_model",      type=int, default=None)
+    parser.add_argument("--num_layers",   type=int, default=None)
+    parser.add_argument("--num_heads",    type=int, default=None)
+    parser.add_argument("--d_ff",         type=int, default=None)
+    parser.add_argument("--num_docs",     type=int, default=None)
+    parser.add_argument("--early_stop",   type=int, default=None)
+    parser.add_argument("--token_budget", type=int, default=None)
     args = parser.parse_args()
 
     # Override globals only if provided
-    if args.d_model    is not None: d_model    = args.d_model
-    if args.num_layers is not None: num_layers = args.num_layers
-    if args.num_heads  is not None: num_heads  = args.num_heads
-    if args.d_ff       is not None: d_ff       = args.d_ff
-    if args.num_docs   is not None: NUM_DOCS   = args.num_docs
-    if args.early_stop is not None: early_stop = args.early_stop
+    if args.d_model      is not None: d_model      = args.d_model
+    if args.num_layers   is not None: num_layers   = args.num_layers
+    if args.num_heads    is not None: num_heads    = args.num_heads
+    if args.d_ff         is not None: d_ff         = args.d_ff
+    if args.num_docs     is not None: NUM_DOCS     = args.num_docs
+    if args.early_stop   is not None: early_stop   = args.early_stop
+    if args.token_budget is not None: token_budget = args.token_budget
 
     main()

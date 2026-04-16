@@ -19,7 +19,7 @@ num_workers = 4
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 25000
+NUM_DOCS       = 500_000
 VOCAB_SIZE     = 4000
 SPECIAL_TOKENS = ["<|endoftext|>"]
 
@@ -31,7 +31,7 @@ num_heads      = 4     # number of attention heads
 num_layers     = 4     # number of transformer layers
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size     = 16
+batch_size     = 128
 learning_rate  = 1e-3
 eval_interval  = 1000  # log every N steps
 early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
@@ -162,8 +162,8 @@ def main():
     train_dataset = LMDataset(token_ids[:split], context_length)
     val_dataset   = LMDataset(token_ids[split:], context_length)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers)
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
     print(f"Train: {len(train_dataset):,} samples, Val: {len(val_dataset):,} samples")
 

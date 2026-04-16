@@ -103,8 +103,11 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
     print(f"Loaded {len(texts):,} documents")
     return texts
 
-def join_documents(data, special_token="<|endoftext|>"):
-    return special_token.join(data) + special_token
+def encode_doc(args):
+    text, tokenizer_path = args
+    tok = Tokenizer.load(tokenizer_path)
+    eos_id = tok.bytes_to_id[b"<|endoftext|>"]
+    return tok.encode(text) + [eos_id]
 
 def main():
 
@@ -128,8 +131,6 @@ def main():
         os.makedirs("tokenizer", exist_ok=True)
         tokenizer.save(tokenizer_path)
         print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
-    
-    corpus = join_documents(raw_texts)
 
 # ── Encode (cached) ──────────────────────────────────────────────────────
     encoded_dir = "encoded"
@@ -140,8 +141,15 @@ def main():
         print(f"Loading cached tokens from {encoded_path} ...")
         token_ids = torch.load(encoded_path)
     else:
-        print("Encoding corpus ...")
-        token_ids = tokenizer.encode(corpus)
+        from multiprocessing import Pool, cpu_count
+        n_workers = min(cpu_count(), 16)
+        tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
+        work = [(text, tokenizer_path) for text in raw_texts]
+
+        with Pool(n_workers) as pool:
+            results = pool.map(encode_doc, work)
+
+        token_ids = [tid for doc_ids in results for tid in doc_ids]
         torch.save(token_ids, encoded_path)
         print(f"Cached tokens to {encoded_path}")
 

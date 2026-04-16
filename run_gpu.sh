@@ -27,6 +27,7 @@ if ! command -v uv &> /dev/null; then
 fi
 
 echo "Installing dependencies ..."
+uv pip install torch torchvision --index https://download.pytorch.org/whl/cu128 --system --index-strategy unsafe-best-match
 uv pip install regex "datasets>=3.0" --system --index-strategy unsafe-best-match
 
 # ── Sweep configuration ──────────────────────────────────────────────────────

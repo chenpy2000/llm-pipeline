@@ -104,11 +104,25 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
     print(f"Loaded {len(texts):,} documents")
     return texts
 
-def encode_doc(args):
-    text, tokenizer_path = args
-    tok = Tokenizer.load(tokenizer_path)
-    eos_id = tok.bytes_to_id[b"<|endoftext|>"]
-    return tok.encode(text) + [eos_id]
+_worker_tokenizer = None
+_worker_eos_id = None
+
+def _init_worker(tokenizer_path):
+    global _worker_tokenizer, _worker_eos_id
+    _worker_tokenizer = Tokenizer.load(tokenizer_path)
+    _worker_eos_id = _worker_tokenizer.bytes_to_id[b"<|endoftext|>"]
+
+def encode_doc(text):
+    import numpy as np
+    ids = _worker_tokenizer.encode(text)
+    ids.append(_worker_eos_id)
+    return np.array(ids, dtype=np.int32)
+
+# def encode_doc(args):
+#     text, tokenizer_path = args
+#     tok = Tokenizer.load(tokenizer_path)
+#     eos_id = tok.bytes_to_id[b"<|endoftext|>"]
+#     return tok.encode(text) + [eos_id]
 
 def main():
 
@@ -142,15 +156,26 @@ def main():
         print(f"Loading cached tokens from {encoded_path} ...")
         token_ids = torch.load(encoded_path)
     else:
+        print("Encoding corpus ...")
+        import numpy as np
         from multiprocessing import Pool, cpu_count
-        n_workers = min(cpu_count(), 16)
+        n_workers = max(1, min(cpu_count() - 1, 16))
         tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-        work = [(text, tokenizer_path) for text in raw_texts]
+        # work = [(text, tokenizer_path) for text in raw_texts]
 
-        with Pool(n_workers) as pool:
-            results = pool.map(encode_doc, work)
+        # with Pool(n_workers) as pool:
+        #     results = pool.map(encode_doc, work)
 
-        token_ids = [tid for doc_ids in results for tid in doc_ids]
+        # token_ids = [tid for doc_ids in results for tid in doc_ids]
+
+        print(f"Tokenizing {len(raw_texts):,} docs with {n_workers} workers ...")
+        with Pool(n_workers, initializer=_init_worker, initargs=(tokenizer_path,)) as pool:
+            results = list(pool.imap_unordered(encode_doc, raw_texts, chunksize=500))
+
+        token_ids = np.concatenate(results)
+        del results
+        token_ids = torch.from_numpy(token_ids)
+
         torch.save(token_ids, encoded_path)
         print(f"Cached tokens to {encoded_path}")
 

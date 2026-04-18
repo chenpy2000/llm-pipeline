@@ -32,7 +32,7 @@ num_heads      = 4     # number of attention heads
 num_layers     = 4     # number of transformer layers
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size     = 128
+batch_size     = 32
 learning_rate  = 1.2e-3
 eval_interval  = 50    # log every N steps
 

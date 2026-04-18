@@ -76,12 +76,12 @@ for cfg in "${CONFIGS[@]}"; do
     echo "──────────────────────────────────────────────────"
 
     uv run python main_gpu.py \
-        --d_model      "$D_MODEL" \
-        --num_layers   "$N_LAYERS" \
-        --num_heads    "$N_HEADS" \
-        --d_ff         "$D_FF" \
-        --num_docs     "$NUM_DOCS" \
-        --token_budget "$TOKEN_BUDGET" \
+        --d_model       "$D_MODEL" \
+        --num_layers    "$N_LAYERS" \
+        --num_heads     "$N_HEADS" \
+        --d_ff          "$D_FF" \
+        --num_docs      "$NUM_DOCS" \
+        --token_budget  "$TOKEN_BUDGET" \
         --learning_rate "$LR"
 
     echo "  ✓ Run ${RUN} complete"

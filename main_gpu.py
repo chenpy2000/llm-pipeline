@@ -332,20 +332,22 @@ def main():
     
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--d_model",      type=int, default=None)
-    parser.add_argument("--num_layers",   type=int, default=None)
-    parser.add_argument("--num_heads",    type=int, default=None)
-    parser.add_argument("--d_ff",         type=int, default=None)
-    parser.add_argument("--num_docs",     type=int, default=None)
-    parser.add_argument("--token_budget", type=int, default=None)
+    parser.add_argument("--d_model",       type=int,   default=None)
+    parser.add_argument("--num_layers",    type=int,   default=None)
+    parser.add_argument("--num_heads",     type=int,   default=None)
+    parser.add_argument("--d_ff",          type=int,   default=None)
+    parser.add_argument("--num_docs",      type=int,   default=None)
+    parser.add_argument("--token_budget",  type=int,   default=None)
+    parser.add_argument("--learning_rate", type=float, default=None)
     args = parser.parse_args()
 
     # Override globals only if provided
-    if args.d_model      is not None: d_model      = args.d_model
-    if args.num_layers   is not None: num_layers   = args.num_layers
-    if args.num_heads    is not None: num_heads    = args.num_heads
-    if args.d_ff         is not None: d_ff         = args.d_ff
-    if args.num_docs     is not None: NUM_DOCS     = args.num_docs
-    if args.token_budget is not None: TOKEN_BUDGET = args.token_budget
+    if args.d_model       is not None: d_model       = args.d_model
+    if args.num_layers    is not None: num_layers    = args.num_layers
+    if args.num_heads     is not None: num_heads     = args.num_heads
+    if args.d_ff          is not None: d_ff          = args.d_ff
+    if args.num_docs      is not None: NUM_DOCS      = args.num_docs
+    if args.token_budget  is not None: TOKEN_BUDGET  = args.token_budget
+    if args.learning_rate is not None: learning_rate = args.learning_rate
 
     main()

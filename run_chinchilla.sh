@@ -45,15 +45,16 @@ NUM_DOCS=300000
 
 CONFIGS=(
     # ═══ Compute ≈ 1e15 FLOPs — dense sweep to resolve U-minimum ═══
-    "96   2  4  384    275000000"   # ~605K × 275M   NEW
-    "96   4  4  384    202000000"   # ~826K × 202M   NEW
-    "128  3  4  512    151000000"   # ~1.1M × 151M   NEW
-    "128  4  4  512    128000000"   # ~1.3M × 128M   (round 1: 4.413)
-    "160  4  4  640    89000000"    # ~1.87M × 89M   NEW
-    "192  4  6  768    67000000"    # ~2.5M × 67M    (round 1: 4.550)
-    "256  6  8  1024   29000000"    # ~5.7M × 29M    (round 1: 4.747)
-    "384  6  6  1536   14000000"    # ~12M × 14M     (round 1: 4.912)
-    "512  8  8  2048   6000000"     # ~27M × 6M      (round 1: 5.454)
+    "96   2  4  384    275000000    1.2e-3"   # ~605K × 275M   NEW
+    "96   4  4  384    202000000    1.2e-3"   # ~826K × 202M   NEW
+    "128  3  4  512    151000000    1.0e-3"   # ~1.1M × 151M   NEW
+    "128  4  4  512    128000000    1.0e-3"   # ~1.3M × 128M   (round 1: 4.413)
+    "160  4  4  640    89000000     9e-4"     # ~1.87M × 89M   NEW
+    "192  4  6  768    67000000     8e-4"     # ~2.5M × 67M    (round 1: 4.550)
+    "256  6  8  1024   29000000     7e-4"     # ~5.7M × 29M    (round 1: 4.747)
+    "384  6  6  1536   14000000     6e-4"     # ~12M × 14M     (round 1: 4.912)
+    "512  8  8  2048   6000000      5e-4"     # ~27M × 6M      (round 1: 5.454)
+
 )
 
 # ── Run sweep ─────────────────────────────────────────────────────────────────
@@ -71,7 +72,7 @@ for cfg in "${CONFIGS[@]}"; do
     echo "──────────────────────────────────────────────────"
     echo "  Run ${RUN}/${#CONFIGS[@]}"
     echo "  d_model=${D_MODEL} | layers=${N_LAYERS} | heads=${N_HEADS} | d_ff=${D_FF}"
-    echo "  token_budget=${TOKEN_BUDGET}"
+    echo "  token_budget=${TOKEN_BUDGET} | lr=${LR}"
     echo "──────────────────────────────────────────────────"
 
     uv run python main_gpu.py \
@@ -80,7 +81,8 @@ for cfg in "${CONFIGS[@]}"; do
         --num_heads    "$N_HEADS" \
         --d_ff         "$D_FF" \
         --num_docs     "$NUM_DOCS" \
-        --token_budget "$TOKEN_BUDGET"
+        --token_budget "$TOKEN_BUDGET" \
+        --learning_rate "$LR"
 
     echo "  ✓ Run ${RUN} complete"
     RUN=$((RUN + 1))

@@ -163,6 +163,9 @@ def main():
         torch.save(token_ids, encoded_path)
         print(f"Cached tokens to {encoded_path}")
 
+    total_tokens = len(token_ids)                 # ← add this
+    print(f"Total tokens: {total_tokens:,}")      # ← and this if you want the log line back
+
     # Train/Valid split
     val_tokens = min(VAL_TOKENS, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
     split = len(token_ids) - val_tokens

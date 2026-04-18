@@ -41,35 +41,26 @@ uv pip install regex "datasets>=3.0" --system --break-system-packages --index-st
 # If it does, the single-epoch loop will exit early and the run will be invalid.
 # All budgets below stay under 150M for safety.
 
-NUM_DOCS=1500000
+NUM_DOCS=300000
 
 CONFIGS=(
-    # ═══ Compute ≈ 3e14 FLOPs ═══
-    "64   2  2  256    140000000"   # ~350K params × 140M tokens
-    "128  4  4  512    38000000"    # ~1.3M × 38M
-    "192  4  6  768    20000000"    # ~2.5M × 20M
-    "256  6  8  1024   9000000"     # ~5.7M × 9M
-    "384  6  6  1536   4000000"     # ~12M  × 4M
-
-    # ═══ Compute ≈ 1e15 FLOPs ═══
-    "128  4  4  512    128000000"   # ~1.3M × 128M
-    "192  4  6  768    67000000"    # ~2.5M × 67M
-    "256  6  8  1024   29000000"    # ~5.7M × 29M
-    "384  6  6  1536   14000000"    # ~12M  × 14M
-    "512  8  8  2048   6000000"     # ~27M  × 6M
-
-    # ═══ Compute ≈ 2e15 FLOPs ═══
-    "192  4  6  768    133000000"   # ~2.5M × 133M
-    "256  6  8  1024   58000000"    # ~5.7M × 58M
-    "384  6  6  1536   28000000"    # ~12M  × 28M
-    "512  8  8  2048   12000000"    # ~27M  × 12M
+    # ═══ Compute ≈ 1e15 FLOPs — dense sweep to resolve U-minimum ═══
+    "96   2  4  384    275000000"   # ~605K × 275M   NEW
+    "96   4  4  384    202000000"   # ~826K × 202M   NEW
+    "128  3  4  512    151000000"   # ~1.1M × 151M   NEW
+    "128  4  4  512    128000000"   # ~1.3M × 128M   (round 1: 4.413)
+    "160  4  4  640    89000000"    # ~1.87M × 89M   NEW
+    "192  4  6  768    67000000"    # ~2.5M × 67M    (round 1: 4.550)
+    "256  6  8  1024   29000000"    # ~5.7M × 29M    (round 1: 4.747)
+    "384  6  6  1536   14000000"    # ~12M × 14M     (round 1: 4.912)
+    "512  8  8  2048   6000000"     # ~27M × 6M      (round 1: 5.454)
 )
 
 # ── Run sweep ─────────────────────────────────────────────────────────────────
 echo ""
 echo "══════════════════════════════════════════════════"
 echo "  Starting Chinchilla sweep: ${#CONFIGS[@]} configurations"
-echo "  NUM_DOCS=${NUM_DOCS} | early_stop=0 (default, required for Chinchilla)"
+echo "  NUM_DOCS=${NUM_DOCS}"
 echo "══════════════════════════════════════════════════"
 
 RUN=1

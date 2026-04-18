@@ -13,15 +13,16 @@ from dataset import LMDataset
 from transformer import Decoder
 
 # ── System ────────────────────────────────────────────────────────────────────
-seed        = 42
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 num_workers = 4
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 500_000
+NUM_DOCS       = 500_000    # On average, each doc contains 1400 tokens (for vocab size 4000).
 VOCAB_SIZE     = 4000
 SPECIAL_TOKENS = ["<|endoftext|>"]
+TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
+VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 context_length = 256   # maximum sequence length
@@ -34,8 +35,7 @@ num_layers     = 4     # number of transformer layers
 batch_size     = 128
 learning_rate  = 1e-3
 eval_interval  = 50    # log every N steps
-early_stop     = 0     # 0 to disable; stop after N evals with no val PPL improvement
-token_budget   = 0     # 0 = disabled (epoch mode), >0 = Chinchilla mode
+
 
 @torch.no_grad()
 def compute_perplexity(decoderLMmodel, data_loader):
@@ -100,29 +100,17 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
         ds.save_to_disk(cache_path)
         print(f"Cached to {cache_path}")
 
-    texts = ds["text"]
-    print(f"Loaded {len(texts):,} documents")
-    return texts
+    print(f"Loaded {len(ds):,} documents")
+    return ds
 
-_worker_tokenizer = None
-_worker_eos_id = None
-
-def _init_worker(tokenizer_path):
-    global _worker_tokenizer, _worker_eos_id
-    _worker_tokenizer = Tokenizer.load(tokenizer_path)
-    _worker_eos_id = _worker_tokenizer.bytes_to_id[b"<|endoftext|>"]
-
-def encode_doc(text):
-    import numpy as np
-    ids = _worker_tokenizer.encode(text)
-    ids.append(_worker_eos_id)
-    return np.array(ids, dtype=np.int32)
-
-# def encode_doc(args):
-#     text, tokenizer_path = args
-#     tok = Tokenizer.load(tokenizer_path)
-#     eos_id = tok.bytes_to_id[b"<|endoftext|>"]
-#     return tok.encode(text) + [eos_id]
+def tokenize_batch(batch, tokenizer_path, eos_id):
+    tok = Tokenizer.load(tokenizer_path)
+    out = []
+    for text in batch["text"]:
+        ids = tok.encode(text)
+        ids.append(eos_id)
+        out.append(ids)
+    return {"ids": out}
 
 def main():
 
@@ -133,7 +121,7 @@ def main():
     print(f"Run output → {run_dir}")
 
     print("Loading Dataset")
-    raw_texts = load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS)
+    ds = load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS)
 
     print("Loading Tokenizer")
     tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
@@ -142,48 +130,34 @@ def main():
         print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
     else:
         print("No saved tokenizer found, training a new one ...")
-        tokenizer = Tokenizer.train(raw_texts, vocab_size=VOCAB_SIZE, special_tokens=SPECIAL_TOKENS)
+        tokenizer = Tokenizer.train(ds["text"], vocab_size=VOCAB_SIZE, special_tokens=SPECIAL_TOKENS)
         os.makedirs("tokenizer", exist_ok=True)
         tokenizer.save(tokenizer_path)
         print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
-# ── Encode (cached) ──────────────────────────────────────────────────────
-    encoded_dir = "encoded"
-    os.makedirs(encoded_dir, exist_ok=True)
-    encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
+    # ── Encode (cached) ──────────────────────────────────────────────────────
 
-    if os.path.exists(encoded_path):
-        print(f"Loading cached tokens from {encoded_path} ...")
-        token_ids = torch.load(encoded_path)
-    else:
-        print("Encoding corpus ...")
-        import numpy as np
-        from multiprocessing import Pool, cpu_count
-        n_workers = max(1, min(cpu_count() - 1, 16))
-        tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-        # work = [(text, tokenizer_path) for text in raw_texts]
+    eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
+    num_proc = min(16, (os.cpu_count() or 1) - 1)
 
-        # with Pool(n_workers) as pool:
-        #     results = pool.map(encode_doc, work)
+    print(f"Tokenizing {len(ds):,} docs with {num_proc} workers ...")
+    ds_tok = ds.map(
+        tokenize_batch,
+        batched=True,
+        batch_size=500,
+        num_proc=num_proc,
+        remove_columns=ds.column_names,
+        fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
+        desc="Tokenizing",
+    )
 
-        # token_ids = [tid for doc_ids in results for tid in doc_ids]
-
-        print(f"Tokenizing {len(raw_texts):,} docs with {n_workers} workers ...")
-        with Pool(n_workers, initializer=_init_worker, initargs=(tokenizer_path,)) as pool:
-            results = list(pool.imap_unordered(encode_doc, raw_texts, chunksize=500))
-
-        token_ids = np.concatenate(results)
-        del results
-        token_ids = torch.from_numpy(token_ids)
-
-        torch.save(token_ids, encoded_path)
-        print(f"Cached tokens to {encoded_path}")
+    token_ids = torch.cat([torch.tensor(row, dtype=torch.long) for row in ds_tok["ids"]])
 
     total_tokens = len(token_ids)
     print(f"Total tokens: {total_tokens:,}")
 
-    # Train/val split (90/10)
-    val_tokens = min(1_000_000, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
+    # Train/Valid split
+    val_tokens = min(VAL_TOKENS, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
     split = len(token_ids) - val_tokens
     train_dataset = LMDataset(token_ids[:split], context_length)
     val_dataset   = LMDataset(token_ids[split:], context_length)
@@ -211,7 +185,7 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
-    total_steps_est = (token_budget // (batch_size * context_length)) if token_budget > 0 else len(train_loader)
+    total_steps_est = (TOKEN_BUDGET // (batch_size * context_length)) if TOKEN_BUDGET > 0 else len(train_loader)
     scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps_est, eta_min=learning_rate * 0.1)
 
     # ── Training log CSV ──────────────────────────────────────────────────────
@@ -263,18 +237,13 @@ def main():
             else:
                 no_improve += 1
 
-            if early_stop > 0 and no_improve >= early_stop:
-                print(f"Early stopping at step {step} (no improvement for {early_stop} evals)")
-                break
-
-        if token_budget > 0 and tokens_seen >= token_budget:
+        if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
             print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
             break
 
     log_file.close()
 
     # Final eval
-    train_ppl = compute_perplexity(model, train_loader)
     val_ppl   = compute_perplexity(model, val_loader)
     print(f"Final — Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f}")
 
@@ -305,7 +274,6 @@ def main():
     # ── Save run config ───────────────────────────────────────────────────────
     run_config = {
         "timestamp": timestamp,
-        "seed": seed,
         "device": str(device),
 
         "data": {
@@ -334,8 +302,7 @@ def main():
             "batch_size": batch_size,
             "learning_rate": learning_rate,
             "eval_interval": eval_interval,
-            "early_stop": early_stop,
-            "token_budget": token_budget,
+            "token_budget": TOKEN_BUDGET,
             "tokens_seen": tokens_seen,
             "final_step": step,
             "total_steps": len(train_loader),
@@ -360,7 +327,6 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads",    type=int, default=None)
     parser.add_argument("--d_ff",         type=int, default=None)
     parser.add_argument("--num_docs",     type=int, default=None)
-    parser.add_argument("--early_stop",   type=int, default=None)
     parser.add_argument("--token_budget", type=int, default=None)
     args = parser.parse_args()
 
@@ -370,7 +336,6 @@ if __name__ == "__main__":
     if args.num_heads    is not None: num_heads    = args.num_heads
     if args.d_ff         is not None: d_ff         = args.d_ff
     if args.num_docs     is not None: NUM_DOCS     = args.num_docs
-    if args.early_stop   is not None: early_stop   = args.early_stop
-    if args.token_budget is not None: token_budget = args.token_budget
+    if args.token_budget is not None: TOKEN_BUDGET = args.token_budget
 
     main()

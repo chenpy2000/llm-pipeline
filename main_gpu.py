@@ -25,7 +25,7 @@ TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
 VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
-context_length = 256   # maximum sequence length
+context_length = 1024  # maximum sequence length
 d_model        = 128   # embedding dimension
 d_ff           = 512   # feedforward dimension (convention: 4 * d_model)
 num_heads      = 4     # number of attention heads

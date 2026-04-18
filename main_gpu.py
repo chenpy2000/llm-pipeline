@@ -137,24 +137,30 @@ def main():
 
     # ── Encode (cached) ──────────────────────────────────────────────────────
 
+    encoded_dir = "encoded"
+    os.makedirs(encoded_dir, exist_ok=True)
+    encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
+
     eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
     num_proc = min(16, (os.cpu_count() or 1) - 1)
-
-    print(f"Tokenizing {len(ds):,} docs with {num_proc} workers ...")
-    ds_tok = ds.map(
-        tokenize_batch,
-        batched=True,
-        batch_size=500,
-        num_proc=num_proc,
-        remove_columns=ds.column_names,
-        fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
-        desc="Tokenizing",
-    )
-
-    token_ids = torch.cat([torch.tensor(row, dtype=torch.long) for row in ds_tok["ids"]])
-
-    total_tokens = len(token_ids)
-    print(f"Total tokens: {total_tokens:,}")
+    
+    if os.path.exists(encoded_path):
+        print(f"Loading cached tokens from {encoded_path} ...")
+        token_ids = torch.load(encoded_path)
+    else:
+        print(f"Tokenizing {len(ds):,} docs with {num_proc} workers ...")
+        ds_tok = ds.map(
+            tokenize_batch,
+            batched=True,
+            batch_size=500,
+            num_proc=num_proc,
+            remove_columns=ds.column_names,
+            fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
+            desc="Tokenizing",
+        )
+        token_ids = torch.cat([torch.tensor(row, dtype=torch.long) for row in ds_tok["ids"]])
+        torch.save(token_ids, encoded_path)
+        print(f"Cached tokens to {encoded_path}")
 
     # Train/Valid split
     val_tokens = min(VAL_TOKENS, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets

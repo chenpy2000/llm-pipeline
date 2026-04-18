@@ -33,7 +33,7 @@ num_layers     = 4     # number of transformer layers
 
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 128
-learning_rate  = 1e-3
+learning_rate  = 1.2e-3
 eval_interval  = 50    # log every N steps
 
 

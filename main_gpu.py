@@ -105,12 +105,12 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
 
 def tokenize_batch(batch, tokenizer_path, eos_id):
     tok = Tokenizer.load(tokenizer_path)
-    out = []
+    flat = []
     for text in batch["text"]:
         ids = tok.encode(text)
         ids.append(eos_id)
-        out.append(ids)
-    return {"ids": out}
+        flat.extend(ids)
+    return {"ids": [flat]}
 
 def main():
 
@@ -143,7 +143,7 @@ def main():
 
     eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
     num_proc = min(16, (os.cpu_count() or 1) - 1)
-    
+
     if os.path.exists(encoded_path):
         print(f"Loading cached tokens from {encoded_path} ...")
         token_ids = torch.load(encoded_path)
@@ -158,7 +158,8 @@ def main():
             fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
             desc="Tokenizing",
         )
-        token_ids = torch.cat([torch.tensor(row, dtype=torch.long) for row in ds_tok["ids"]])
+        ds_tok.set_format("torch")
+        token_ids = torch.cat([row["ids"] for row in ds_tok])
         torch.save(token_ids, encoded_path)
         print(f"Cached tokens to {encoded_path}")
 

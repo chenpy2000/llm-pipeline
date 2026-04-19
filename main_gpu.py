@@ -1,5 +1,6 @@
 import torch
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 import os
 import csv
 import json
@@ -196,7 +197,22 @@ def main():
 
     # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
     total_steps_est = (TOKEN_BUDGET // (batch_size * context_length)) if TOKEN_BUDGET > 0 else len(train_loader)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=total_steps_est, eta_min=learning_rate * 0.1)
+    
+    # Calculate warmup steps (e.g., 2% of total steps)
+    warmup_steps = max(1, int(0.02 * total_steps_est))
+    
+    # 1. Warmup: linearly scale LR from near-zero to full learning_rate
+    warmup_scheduler = LinearLR(optimizer, start_factor=1e-5, end_factor=1.0, total_iters=warmup_steps)
+    
+    # 2. Decay: Cosine annealing for the remaining steps down to 10% of max LR
+    cosine_scheduler = CosineAnnealingLR(optimizer, T_max=total_steps_est - warmup_steps, eta_min=learning_rate * 0.1)
+    
+    # 3. Chain them together
+    scheduler = SequentialLR(
+        optimizer, 
+        schedulers=[warmup_scheduler, cosine_scheduler], 
+        milestones=[warmup_steps]
+    )
 
     # ── Training log CSV ──────────────────────────────────────────────────────
     log_path = os.path.join(run_dir, f"training_log_{timestamp}.csv")

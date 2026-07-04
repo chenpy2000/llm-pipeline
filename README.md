@@ -10,13 +10,21 @@ The first phase studied how to spend pre-training compute for a small from-scrat
 
 ![Corrected Chinchilla scaling law result](chinchilla_curve.png)
 
-The main pre-training result: at this small scale, the compute-optimal data-to-parameter ratio was much higher than the classical large-model Chinchilla rule of `D/N ~= 20`, and decreased as compute increased.
+The main pre-training result: at this small scale, the compute-optimal data-to-parameter ratio was much higher than the classical large-model Chinchilla rule of `D/N ~= 20`, and decreased as compute increased. The extended small-model tail in the `5e14` FLOP sweep helped resolve the left side of the U-curve, showing that below a certain model size, adding more tokens no longer compensates for limited capacity.
 
-| Compute | Optimal N | Optimal D/N |
-|---|---:|---:|
-| `5e14` FLOPs | about `0.44M` | about `430` |
-| `1e15` FLOPs | about `0.79M` | about `270` |
-| `5e15` FLOPs | about `2.65M` | about `120` |
+| Compute | Optimal N | Optimal D | Optimal D/N |
+|---|---:|---:|---:|
+| `5e14` FLOPs | about `0.45M` | about `189M` tokens | about `422` |
+| `1e15` FLOPs | about `0.79M` | about `212M` tokens | about `267` |
+| `5e15` FLOPs | about `2.67M` | about `314M` tokens | about `118` |
+
+Fitting the three corrected optima gives this experiment-specific relationship between model size and training data:
+
+$$
+D_{\mathrm{opt}} \approx 2.34 \times 10^8 \left(\frac{N}{10^6}\right)^{0.29}
+$$
+
+In plain terms, a `10x` increase in non-embedding model size corresponded to only about `2x` more optimal training tokens in these small-scale runs, while tokens per parameter dropped sharply as the model got larger.
 
 For the detailed experiment record, including the original README, sweep scripts, plots, and notes, see the [`1_scaling_law` branch](https://github.com/chenpy2000/llm-pipeline/tree/1_scaling_law).
 

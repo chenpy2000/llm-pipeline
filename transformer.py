@@ -66,9 +66,9 @@ class MultiHeadAttention(nn.Module):
 class DecoderLayer(nn.Module):
     def __init__(self, d_model, n_head, d_ff, dropout=0.0, rope_base=10000.0):
         super(DecoderLayer, self).__init__()
-        self.ln1 = nn.LayerNorm(d_model)
+        self.ln1 = nn.RMSNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_head, masked=True, rope_base=rope_base)
-        self.ln2 = nn.LayerNorm(d_model)
+        self.ln2 = nn.RMSNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
             nn.ReLU(),
@@ -77,18 +77,9 @@ class DecoderLayer(nn.Module):
         )
 
     def forward(self, x):
-        # Pre-LN 
         attn_output, attn_probs = self.attn(self.ln1(x))  # B x T x n_embd, B x n_head x T x T
         x = x + attn_output
         x = x + self.ff(self.ln2(x))  # B x T x n_out
-
-        # Post-LN
-        # attn_output, attn_probs = self.attn(x)
-        # x = x + attn_output
-        # x = self.ln1(x)
-        # ff_output = self.ff(x)
-        # x = x + ff_output
-        # x = self.ln2(x)
 
         return x, attn_probs
 
@@ -101,7 +92,7 @@ class Decoder(nn.Module):
             DecoderLayer(d_model=d_model, n_head=n_head, d_ff=d_ff, rope_base=rope_base)
             for _ in range(n_layer)
         ])
-        self.ln_f = nn.LayerNorm(d_model)
+        self.ln_f = nn.RMSNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size)
         self.lm_head.weight = self.tok_emb.weight
         self.loss_fn = nn.CrossEntropyLoss()

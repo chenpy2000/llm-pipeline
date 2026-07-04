@@ -47,6 +47,8 @@ Added RoPE inside each attention layer, replacing the previous learned positiona
 
 Added tied embeddings by sharing the token embedding weights with the output projection weights.
 
+Replaced LayerNorm with RMSNorm throughout the decoder.
+
 ## Active Code
 
 | Path | Purpose |

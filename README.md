@@ -43,6 +43,8 @@ Post-training work will focus on:
 
 ### New Updates On Post-Training Techniques
 
+Added RoPE inside each attention layer, replacing the previous learned positional embedding table.
+
 ## Active Code
 
 | Path | Purpose |

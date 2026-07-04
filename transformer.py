@@ -1,18 +1,35 @@
 import torch
 import torch.nn as nn
 
+
+def apply_rope(x, cos, sin):
+    # x: B x n_head x T x head_dim
+    x_even = x[..., 0::2]
+    x_odd = x[..., 1::2]
+
+    x_rotated = torch.empty_like(x)
+    x_rotated[..., 0::2] = x_even * cos - x_odd * sin
+    x_rotated[..., 1::2] = x_even * sin + x_odd * cos
+    return x_rotated
+
+
 class MultiHeadAttention(nn.Module):
-    def __init__(self, n_embd, n_head, masked=False):
+    def __init__(self, n_embd, n_head, masked=False, rope_base=10000.0):
         super(MultiHeadAttention, self).__init__()
         assert n_embd % n_head == 0, "Embedding dimension must be divisible by number of heads"
         self.masked = masked
         self.n_embd = n_embd
         self.n_head = n_head
         self.head_dim = n_embd // n_head
+        assert self.head_dim % 2 == 0, "RoPE requires even head dimension"
         self.W_q = nn.Linear(n_embd, n_embd)
         self.W_k = nn.Linear(n_embd, n_embd)
         self.W_v = nn.Linear(n_embd, n_embd)
         self.W_o = nn.Linear(n_embd, n_embd)
+        inv_freq = 1.0 / (
+            rope_base ** (torch.arange(0, self.head_dim, 2).float() / self.head_dim)
+        )
+        self.register_buffer("rope_inv_freq", inv_freq, persistent=False)
 
     def forward(self, x):
         # x: B x T x n_embd
@@ -25,6 +42,13 @@ class MultiHeadAttention(nn.Module):
         Q = Q.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # B x n_head x T x head_dim
         K = K.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # B x n_head x T x head_dim
         V = V.view(B, T, self.n_head, self.head_dim).transpose(1, 2) # B x n_head x T x head_dim    
+
+        positions = torch.arange(T, device=x.device, dtype=self.rope_inv_freq.dtype)
+        freqs = torch.outer(positions, self.rope_inv_freq)
+        cos = freqs.cos()[None, None, :, :].to(dtype=Q.dtype)
+        sin = freqs.sin()[None, None, :, :].to(dtype=Q.dtype)
+        Q = apply_rope(Q, cos, sin)
+        K = apply_rope(K, cos, sin)
 
         attn_scores = torch.matmul(Q, K.transpose(-2, -1)) / (self.head_dim ** 0.5)  # B x n_head x T x T
 
@@ -40,10 +64,10 @@ class MultiHeadAttention(nn.Module):
         return attn_output, attn_probs
 
 class DecoderLayer(nn.Module):
-    def __init__(self, d_model, n_head, d_ff, dropout=0.0):
+    def __init__(self, d_model, n_head, d_ff, dropout=0.0, rope_base=10000.0):
         super(DecoderLayer, self).__init__()
         self.ln1 = nn.LayerNorm(d_model)
-        self.attn = MultiHeadAttention(d_model, n_head, masked=True)
+        self.attn = MultiHeadAttention(d_model, n_head, masked=True, rope_base=rope_base)
         self.ln2 = nn.LayerNorm(d_model)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_ff),
@@ -69,13 +93,12 @@ class DecoderLayer(nn.Module):
         return x, attn_probs
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, block_size, d_model, n_head, d_ff, n_layer):
+    def __init__(self, vocab_size, d_model, n_head, d_ff, n_layer, rope_base=10000.0):
         super(Decoder, self).__init__()
         self.n_embd = d_model
         self.tok_emb = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
-        self.pos_emb = nn.Embedding(num_embeddings=block_size, embedding_dim=d_model)
         self.blocks = nn.ModuleList([
-            DecoderLayer(d_model=d_model, n_head=n_head, d_ff=d_ff)
+            DecoderLayer(d_model=d_model, n_head=n_head, d_ff=d_ff, rope_base=rope_base)
             for _ in range(n_layer)
         ])
         self.ln_f = nn.LayerNorm(d_model)
@@ -84,9 +107,7 @@ class Decoder(nn.Module):
 
     def forward(self, x, y=None):
         # x: B x T
-        B, T = x.shape
-        pos = torch.arange(T, device=x.device).unsqueeze(0).expand(B, T)
-        out = self.tok_emb(x) + self.pos_emb(pos)
+        out = self.tok_emb(x)
 
         att_maps = []
         for block in self.blocks:

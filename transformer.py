@@ -63,18 +63,29 @@ class MultiHeadAttention(nn.Module):
 
         return attn_output, attn_probs
 
+
+class SwiGLUFFN(nn.Module):
+    def __init__(self, d_model, swiglu_d, dropout=0.0):
+        super(SwiGLUFFN, self).__init__()
+        self.up_gate = nn.Linear(d_model, 2 * swiglu_d)
+        self.act = nn.SiLU()
+        self.down = nn.Linear(swiglu_d, d_model)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x):
+        values, gates = self.up_gate(x).chunk(2, dim=-1)
+        x = values * self.act(gates)
+        x = self.down(x)
+        return self.dropout(x)
+
+
 class DecoderLayer(nn.Module):
-    def __init__(self, d_model, n_head, d_ff, dropout=0.0, rope_base=10000.0):
+    def __init__(self, d_model, n_head, swiglu_d, dropout=0.0, rope_base=10000.0):
         super(DecoderLayer, self).__init__()
         self.ln1 = nn.RMSNorm(d_model)
         self.attn = MultiHeadAttention(d_model, n_head, masked=True, rope_base=rope_base)
         self.ln2 = nn.RMSNorm(d_model)
-        self.ff = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.ReLU(),
-            nn.Linear(d_ff, d_model),
-            nn.Dropout(dropout)
-        )
+        self.ff = SwiGLUFFN(d_model, swiglu_d, dropout=dropout)
 
     def forward(self, x):
         attn_output, attn_probs = self.attn(self.ln1(x))  # B x T x n_embd, B x n_head x T x T
@@ -84,12 +95,12 @@ class DecoderLayer(nn.Module):
         return x, attn_probs
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, d_model, n_head, d_ff, n_layer, rope_base=10000.0):
+    def __init__(self, vocab_size, d_model, n_head, swiglu_d, n_layer, rope_base=10000.0):
         super(Decoder, self).__init__()
         self.n_embd = d_model
         self.tok_emb = nn.Embedding(num_embeddings=vocab_size, embedding_dim=d_model)
         self.blocks = nn.ModuleList([
-            DecoderLayer(d_model=d_model, n_head=n_head, d_ff=d_ff, rope_base=rope_base)
+            DecoderLayer(d_model=d_model, n_head=n_head, swiglu_d=swiglu_d, rope_base=rope_base)
             for _ in range(n_layer)
         ])
         self.ln_f = nn.RMSNorm(d_model)

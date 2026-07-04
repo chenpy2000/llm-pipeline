@@ -31,7 +31,7 @@ VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)
 # ── Model ─────────────────────────────────────────────────────────────────────
 context_length = 1024  # maximum sequence length
 d_model        = 128   # embedding dimension
-d_ff           = 512   # feedforward dimension (convention: 4 * d_model)
+swiglu_d       = 512   # SwiGLU hidden dimension
 num_heads      = 4     # number of attention heads
 num_layers     = 4     # number of transformer layers
 rope_base      = 10000.0
@@ -191,13 +191,13 @@ def main():
     model = Decoder(vocab_size=tokenizer.vocab_size,
                     d_model=d_model,
                     n_head=num_heads,
-                    d_ff=d_ff,
+                    swiglu_d=swiglu_d,
                     n_layer=num_layers,
                     rope_base=rope_base)
     
     print("Model Summary:")
     print(f"  Layers: {num_layers} | Heads: {num_heads} | Context: {context_length}")
-    print(f"  d_model: {d_model} | d_ff: {d_ff} | RoPE base: {rope_base:g}")
+    print(f"  d_model: {d_model} | swiglu_d: {swiglu_d} | RoPE base: {rope_base:g}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
 
@@ -330,7 +330,7 @@ def main():
         "model": {
             "context_length": context_length,
             "d_model": d_model,
-            "d_ff": d_ff,
+            "swiglu_d": swiglu_d,
             "num_heads": num_heads,
             "num_layers": num_layers,
             "rope_base": rope_base,
@@ -364,7 +364,7 @@ if __name__ == "__main__":
     parser.add_argument("--d_model",       type=int,   default=None)
     parser.add_argument("--num_layers",    type=int,   default=None)
     parser.add_argument("--num_heads",     type=int,   default=None)
-    parser.add_argument("--d_ff",          type=int,   default=None)
+    parser.add_argument("--swiglu_d",      type=int,   default=None)
     parser.add_argument("--rope_base",     type=float, default=None)
     parser.add_argument("--num_docs",      type=int,   default=None)
     parser.add_argument("--vocab_size",    type=int,   default=None)
@@ -378,7 +378,7 @@ if __name__ == "__main__":
     if args.d_model       is not None: d_model       = args.d_model
     if args.num_layers    is not None: num_layers    = args.num_layers
     if args.num_heads     is not None: num_heads     = args.num_heads
-    if args.d_ff          is not None: d_ff          = args.d_ff
+    if args.swiglu_d      is not None: swiglu_d      = args.swiglu_d
     if args.rope_base     is not None: rope_base     = args.rope_base
     if args.num_docs      is not None: NUM_DOCS      = args.num_docs
     if args.vocab_size    is not None: VOCAB_SIZE    = args.vocab_size

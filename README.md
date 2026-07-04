@@ -49,6 +49,8 @@ Added tied embeddings by sharing the token embedding weights with the output pro
 
 Replaced LayerNorm with RMSNorm throughout the decoder.
 
+Replaced the ReLU feed-forward network with a SwiGLU FFN.
+
 ## Active Code
 
 | Path | Purpose |
@@ -78,7 +80,7 @@ uv run main.py
 Useful overrides:
 
 ```bash
-uv run main.py --d_model 128 --num_layers 4 --num_heads 4 --d_ff 512
+uv run main.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
 uv run main.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
 ```
 

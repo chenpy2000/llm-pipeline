@@ -15,11 +15,14 @@ from transformer import Decoder
 
 # ── System ────────────────────────────────────────────────────────────────────
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+cpu_count   = os.cpu_count() or 1
 num_workers = 4
+TOKENIZER_WORKERS = max(1, cpu_count - 1)
+ENCODE_WORKERS    = max(1, cpu_count - 1)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 100_000    # On average, each doc contains 1400 tokens (for vocab size 4000).
+NUM_DOCS       = 200_000    # Good starting point for a 32k tokenizer on a workstation CPU.
 VOCAB_SIZE     = 32768
 SPECIAL_TOKENS = ["<|endoftext|>"]
 TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
@@ -131,7 +134,12 @@ def main():
         print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
     else:
         print("No saved tokenizer found, training a new one ...")
-        tokenizer = Tokenizer.train(ds["text"], vocab_size=VOCAB_SIZE, special_tokens=SPECIAL_TOKENS)
+        tokenizer = Tokenizer.train(
+            ds["text"],
+            vocab_size=VOCAB_SIZE,
+            special_tokens=SPECIAL_TOKENS,
+            num_workers=TOKENIZER_WORKERS,
+        )
         os.makedirs("tokenizer", exist_ok=True)
         tokenizer.save(tokenizer_path)
         print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
@@ -143,7 +151,7 @@ def main():
     encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
 
     eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
-    num_proc = min(16, (os.cpu_count() or 1) - 1)
+    num_proc = max(1, min(ENCODE_WORKERS, len(ds)))
 
     if os.path.exists(encoded_path):
         print(f"Loading cached tokens from {encoded_path} ...")
@@ -308,11 +316,14 @@ def main():
             "total_tokens": total_tokens,
             "train_samples": len(train_dataset),
             "val_samples": len(val_dataset),
+            "encode_workers": num_proc,
         },
 
         "tokenizer": {
             "vocab_size": tokenizer.vocab_size,
             "special_tokens": SPECIAL_TOKENS,
+            "tokenizer_workers": TOKENIZER_WORKERS,
+            "tokenizer_path": tokenizer_path,
         },
 
         "model": {
@@ -353,8 +364,11 @@ if __name__ == "__main__":
     parser.add_argument("--num_heads",     type=int,   default=None)
     parser.add_argument("--d_ff",          type=int,   default=None)
     parser.add_argument("--num_docs",      type=int,   default=None)
+    parser.add_argument("--vocab_size",    type=int,   default=None)
     parser.add_argument("--token_budget",  type=int,   default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
+    parser.add_argument("--tokenizer_workers", type=int, default=None)
+    parser.add_argument("--encode_workers",    type=int, default=None)
     args = parser.parse_args()
 
     # Override globals only if provided
@@ -363,7 +377,10 @@ if __name__ == "__main__":
     if args.num_heads     is not None: num_heads     = args.num_heads
     if args.d_ff          is not None: d_ff          = args.d_ff
     if args.num_docs      is not None: NUM_DOCS      = args.num_docs
+    if args.vocab_size    is not None: VOCAB_SIZE    = args.vocab_size
     if args.token_budget  is not None: TOKEN_BUDGET  = args.token_budget
     if args.learning_rate is not None: learning_rate = args.learning_rate
+    if args.tokenizer_workers is not None: TOKENIZER_WORKERS = args.tokenizer_workers
+    if args.encode_workers    is not None: ENCODE_WORKERS    = args.encode_workers
 
     main()

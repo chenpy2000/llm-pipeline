@@ -18,14 +18,103 @@ Usage:
 """
 
 import heapq
+from multiprocessing import Process, Queue
 import regex as re
 from collections import Counter, defaultdict
+
+TOKEN_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+
+
+def _chunk_sequence(sequence, chunk_count):
+    item_count = len(sequence)
+    if item_count == 0:
+        return []
+
+    chunk_count = max(1, min(chunk_count, item_count))
+    chunk_size = (item_count + chunk_count - 1) // chunk_count
+    return [sequence[i:i + chunk_size] for i in range(0, item_count, chunk_size)]
+
+
+def _resolve_worker_count(num_workers, item_count):
+    if num_workers is None or item_count <= 1:
+        return 1
+    return max(1, min(int(num_workers), item_count))
+
+
+def _count_text_chunk(texts):
+    data = Counter()
+    for text in texts:
+        for match in re.finditer(TOKEN_PATTERN, text):
+            elements = match.group().encode("utf-8")
+            token_tuple = tuple(bytes([b]) for b in elements)
+            data[token_tuple] += 1
+    return data
+
+
+def _count_pair_chunk(items):
+    pair_counts = Counter()
+    for token_tuple, count in items:
+        for i in range(len(token_tuple) - 1):
+            pair = (token_tuple[i], token_tuple[i + 1])
+            pair_counts[pair] += count
+    return pair_counts
+
+
+def _merge_pair_tokens(token_tuple, pair_to_merge, new_token, count):
+    deltas = defaultdict(int)
+    out = []
+    i = 0
+    while i < len(token_tuple):
+        if i < len(token_tuple) - 1 and (token_tuple[i], token_tuple[i + 1]) == pair_to_merge:
+            left = out[-1] if out else None
+            right = token_tuple[i + 2] if i + 2 < len(token_tuple) else None
+
+            deltas[(token_tuple[i], token_tuple[i + 1])] -= count
+            if left is not None:
+                deltas[(left, token_tuple[i])] -= count
+                deltas[(left, new_token)] += count
+            if right is not None:
+                deltas[(token_tuple[i + 1], right)] -= count
+                deltas[(new_token, right)] += count
+
+            out.append(new_token)
+            i += 2
+        else:
+            out.append(token_tuple[i])
+            i += 1
+    return tuple(out), deltas
+
+
+def _tokenizer_train_worker(worker_id, texts, task_queue, result_queue):
+    data = _count_text_chunk(texts)
+    pair_counts = _count_pair_chunk(data.items())
+    result_queue.put(("ready", worker_id, pair_counts, len(data)))
+
+    while True:
+        task = task_queue.get()
+        if task is None:
+            break
+
+        best_pair, new_token = task
+        new_data = Counter()
+        total_deltas = Counter()
+
+        for token_tuple, count in data.items():
+            new_token_tuple, deltas = _merge_pair_tokens(
+                token_tuple, best_pair, new_token, count
+            )
+            new_data[new_token_tuple] += count
+            total_deltas.update(deltas)
+
+        data = new_data
+        result_queue.put(("merged", worker_id, total_deltas, len(data)))
+
 
 class Tokenizer:
 
     # OpenAI's GPT tokenizer regex
     # break text into chunks
-    PAT = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+    PAT = TOKEN_PATTERN
 
     def __init__(self, vocab, merges, special_tokens):
         self.vocab = vocab                                      # dict[int, bytes]
@@ -35,7 +124,7 @@ class Tokenizer:
         self.bytes_to_id = {v: k for k, v in vocab.items()}
 
     @classmethod
-    def train(cls, texts, vocab_size, special_tokens):
+    def train(cls, texts, vocab_size, special_tokens, num_workers=1, progress_interval=1000):
         """
         Train a BPE tokenizer on the given texts.
 
@@ -43,16 +132,106 @@ class Tokenizer:
             list[str] texts: List of strings to train on.
             int vocab_size: Target vocabulary size.
             list[str] special_tokens: List of special token strings.
+            int num_workers: Number of worker processes for counting/update work.
 
         Returns:
             A trained Tokenizer instance.
         """
-        data = Counter()
-        for text in texts:
-            for match in re.finditer(cls.PAT, text):
-                elements = match.group().encode('utf-8')
-                token_tuple = tuple(bytes([b]) for b in elements)
-                data[token_tuple] += 1
+        text_count = len(texts)
+        worker_count = _resolve_worker_count(num_workers, text_count)
+
+        if worker_count > 1:
+            print(f"Training tokenizer with {worker_count} workers ...", flush=True)
+            return cls._train_parallel(
+                texts,
+                worker_count,
+                vocab_size,
+                special_tokens,
+                progress_interval,
+            )
+
+        data = _count_text_chunk(texts)
+        pair_counts = _count_pair_chunk(list(data.items()))
+
+        return cls._train_from_counts(
+            data,
+            pair_counts,
+            vocab_size,
+            special_tokens,
+            worker_count=1,
+            progress_interval=progress_interval,
+        )
+
+    @classmethod
+    def _train_parallel(
+        cls,
+        texts,
+        worker_count,
+        vocab_size,
+        special_tokens,
+        progress_interval,
+    ):
+        text_chunks = _chunk_sequence(texts, worker_count)
+        worker_count = len(text_chunks)
+        task_queues = [Queue() for _ in range(worker_count)]
+        result_queue = Queue()
+        processes = []
+
+        for worker_id, chunk in enumerate(text_chunks):
+            process = Process(
+                target=_tokenizer_train_worker,
+                args=(worker_id, chunk, task_queues[worker_id], result_queue),
+            )
+            process.start()
+            processes.append(process)
+
+        del text_chunks
+
+        try:
+            pair_counts = Counter()
+            active_token_count = 0
+            for _ in processes:
+                message, _worker_id, chunk_counts, data_len = result_queue.get()
+                if message != "ready":
+                    raise RuntimeError(f"Unexpected tokenizer worker message: {message}")
+                pair_counts.update(chunk_counts)
+                active_token_count += data_len
+
+            return cls._train_from_counts(
+                data=None,
+                pair_counts=pair_counts,
+                vocab_size=vocab_size,
+                special_tokens=special_tokens,
+                task_queues=task_queues,
+                result_queue=result_queue,
+                worker_count=worker_count,
+                active_token_count=active_token_count,
+                progress_interval=progress_interval,
+            )
+        finally:
+            for task_queue in task_queues:
+                task_queue.put(None)
+
+            for process in processes:
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.terminate()
+                    process.join()
+
+    @classmethod
+    def _train_from_counts(
+        cls,
+        data,
+        pair_counts,
+        vocab_size,
+        special_tokens,
+        task_queues=None,
+        result_queue=None,
+        worker_count=1,
+        active_token_count=None,
+        progress_interval=1000,
+    ):
+        """Finish BPE training after text and initial pair counts are built."""
 
         vocab_elems = []
         for token_str in special_tokens:
@@ -60,12 +239,6 @@ class Tokenizer:
         vocab_elems += [bytes([i]) for i in range(256)]
 
         merges = []
-        pair_counts = defaultdict(int)
-        for token_tuple, count in data.items():
-            for i in range(len(token_tuple) - 1):
-                pair = (token_tuple[i], token_tuple[i+1])
-                pair_counts[pair] += count
-
         heap = [(-count, pair) for pair, count in pair_counts.items()]
         heapq.heapify(heap)
 
@@ -84,18 +257,31 @@ class Tokenizer:
             vocab_elems.append(new_token)
 
             #3, update the keys in data
-            new_data = Counter()
-            total_deltas = defaultdict(int)
+            if task_queues is not None:
+                total_deltas = Counter()
+                active_token_count = 0
 
-            for token_tuple, count in data.items():
-                # Create a new token tuple by merging the best_pair
-                # (b'h', b'e', b'l', b'l', b'o') -> (b'h', b'e', b'll', b'o')
-                new_token_tuple, deltas = cls.merge_pair(
-                    token_tuple, best_pair, new_token, count
-                )
-                new_data[new_token_tuple] += count
-                for p, d in deltas.items():
-                    total_deltas[p] += d
+                for task_queue in task_queues:
+                    task_queue.put((best_pair, new_token))
+
+                for _ in range(worker_count):
+                    message, _worker_id, chunk_deltas, data_len = result_queue.get()
+                    if message != "merged":
+                        raise RuntimeError(f"Unexpected tokenizer worker message: {message}")
+                    total_deltas.update(chunk_deltas)
+                    active_token_count += data_len
+            else:
+                new_data = Counter()
+                total_deltas = Counter()
+
+                for token_tuple, count in data.items():
+                    # Create a new token tuple by merging the best_pair
+                    # (b'h', b'e', b'l', b'l', b'o') -> (b'h', b'e', b'll', b'o')
+                    new_token_tuple, deltas = cls.merge_pair(
+                        token_tuple, best_pair, new_token, count
+                    )
+                    new_data[new_token_tuple] += count
+                    total_deltas.update(deltas)
 
             #4, update pair_counts with deltas
             for p, d in total_deltas.items():
@@ -106,7 +292,16 @@ class Tokenizer:
                     heapq.heappush(heap, (-pair_counts[p], p))
 
             # Replace old data with the newly merged data for the next loop
-            data = new_data
+            if task_queues is None:
+                data = new_data
+
+            if progress_interval and len(vocab_elems) % progress_interval == 0:
+                active_tokens = active_token_count if task_queues is not None else len(data)
+                print(
+                    f"  vocab {len(vocab_elems):,}/{vocab_size:,} | "
+                    f"active tokens {active_tokens:,} | pairs {len(pair_counts):,}",
+                    flush=True,
+                )
 
         vocab = {i: token for i, token in enumerate(vocab_elems)}
 
@@ -136,30 +331,7 @@ class Tokenizer:
             Returns: ((b'h', b'e', b'll', b'o'), {...deltas...})
         """
 
-        deltas = defaultdict(int)
-        out = []
-        i = 0
-        while i < len(token_tuple):
-            # Check if the pair (b'l', b'l') exists at the current position
-            if i < len(token_tuple) - 1 and (token_tuple[i], token_tuple[i+1]) == pair_to_merge:
-                left = out[-1] if out else None
-                right = token_tuple[i+2] if i + 2 < len(token_tuple) else None
-
-                deltas[(token_tuple[i], token_tuple[i+1])] -= count
-                if left is not None:
-                    deltas[(left, token_tuple[i])] -= count
-                    deltas[(left, new_token)] += count
-                if right is not None:
-                    deltas[(token_tuple[i+1], right)] -= count
-                    deltas[(new_token, right)] += count
-
-                out.append(new_token)
-                i += 2 # Skip both elements of the pair
-            else:
-                # No match, just append the current element
-                out.append(token_tuple[i])
-                i += 1
-        return tuple(out), deltas
+        return _merge_pair_tokens(token_tuple, pair_to_merge, new_token, count)
 
     def encode(self, text):
         ids = []

@@ -41,6 +41,8 @@ Post-training work will focus on:
 - exploring preference tuning or other alignment steps;
 - building toward an agent loop that can read code, modify files, run tests, and improve from feedback.
 
+### New Updates On Post-Training Techniques
+
 ## Active Code
 
 | Path | Purpose |

@@ -19,8 +19,8 @@ num_workers = 4
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 500_000    # On average, each doc contains 1400 tokens (for vocab size 4000).
-VOCAB_SIZE     = 4000
+NUM_DOCS       = 100_000    # On average, each doc contains 1400 tokens (for vocab size 4000).
+VOCAB_SIZE     = 32768
 SPECIAL_TOKENS = ["<|endoftext|>"]
 TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
 VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)

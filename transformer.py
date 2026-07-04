@@ -103,6 +103,7 @@ class Decoder(nn.Module):
         ])
         self.ln_f = nn.LayerNorm(d_model)
         self.lm_head = nn.Linear(d_model, vocab_size)
+        self.lm_head.weight = self.tok_emb.weight
         self.loss_fn = nn.CrossEntropyLoss()
 
     def forward(self, x, y=None):

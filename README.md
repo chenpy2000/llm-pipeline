@@ -45,6 +45,8 @@ Post-training work will focus on:
 
 Added RoPE inside each attention layer, replacing the previous learned positional embedding table.
 
+Added tied embeddings by sharing the token embedding weights with the output projection weights.
+
 ## Active Code
 
 | Path | Purpose |

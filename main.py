@@ -29,16 +29,17 @@ TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
 VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)
 
 # ── Model ─────────────────────────────────────────────────────────────────────
-context_length = 1024  # maximum sequence length
-d_model        = 128   # embedding dimension
-swiglu_d       = 512   # SwiGLU hidden dimension
-num_heads      = 4     # number of attention heads
-num_layers     = 4     # number of transformer layers
-rope_base      = 10000.0
+ARCHITECTURE_REFERENCE = "Qwen 2.5-Coder"
+context_length = 1024       # maximum sequence length
+d_model        = 1536       # embedding dimension
+swiglu_d       = 8960       # SwiGLU hidden dimension
+num_heads      = 12         # number of attention heads
+num_layers     = 28         # number of transformer layers
+rope_base      = 1_000_000.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 32
-learning_rate  = 1.2e-3
+learning_rate  = 3e-4
 eval_interval  = 50    # log every N steps
 
 
@@ -328,6 +329,7 @@ def main():
         },
 
         "model": {
+            "architecture_reference": ARCHITECTURE_REFERENCE,
             "context_length": context_length,
             "d_model": d_model,
             "swiglu_d": swiglu_d,

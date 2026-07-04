@@ -32,6 +32,8 @@ For the detailed experiment record, including the original README, sweep scripts
 
 The next phase starts here. The goal is to move from a general pre-trained base model toward a coding-oriented assistant model.
 
+Current training target: train a coding base model that references the Qwen 2.5-Coder architecture. The active `main.py` defaults now use `d_model=1536`, `num_layers=28`, `num_heads=12`, `swiglu_d=8960`, `vocab_size=32768`, `rope_base=1000000`, and `learning_rate=0.0003`.
+
 Post-training work will focus on:
 
 - settling the model architecture before running more training;
@@ -80,6 +82,15 @@ uv run main.py
 Useful overrides:
 
 ```bash
+uv run main.py \
+  --d_model 1536 \
+  --num_layers 28 \
+  --num_heads 12 \
+  --swiglu_d 8960 \
+  --vocab_size 32768 \
+  --rope_base 1000000 \
+  --learning_rate 0.0003
+
 uv run main.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
 uv run main.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
 ```

@@ -32,7 +32,7 @@ For the detailed experiment record, including the original README, sweep scripts
 
 The next phase starts here. The goal is to move from a general pre-trained base model toward a coding-oriented assistant model.
 
-Current training target: train a coding base model that references the Qwen2.5-Coder-0.5B architecture. The active `main.py` defaults now use `d_model=896`, `num_layers=24`, `num_heads=14`, `num_key_value_heads=2`, `swiglu_d=4864`, `vocab_size=32768`, `rope_base=1000000`, and `learning_rate=0.0003`.
+Current training target: train a coding base model that references the Qwen2.5-Coder-0.5B architecture. The active `main_pretrain.py` defaults now use `d_model=896`, `num_layers=24`, `num_heads=14`, `num_key_value_heads=2`, `swiglu_d=4864`, `vocab_size=32768`, `rope_base=1000000`, and `learning_rate=0.0003`.
 
 Post-training work will focus on:
 
@@ -59,7 +59,7 @@ Added grouped-query attention, using 14 query heads and 2 shared key-value heads
 
 | Path | Purpose |
 |---|---|
-| `main.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
+| `main_pretrain.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
 | `transformer.py` | Decoder-only transformer model |
 | `tokenizer.py` | BPE tokenizer implementation |
 | `dataset.py` | Causal language-modeling dataset |
@@ -78,13 +78,13 @@ uv sync
 Run the active training pipeline:
 
 ```bash
-uv run main.py
+uv run main_pretrain.py
 ```
 
 Useful overrides:
 
 ```bash
-uv run main.py \
+uv run main_pretrain.py \
   --d_model 896 \
   --num_layers 24 \
   --num_heads 14 \
@@ -94,8 +94,8 @@ uv run main.py \
   --rope_base 1000000 \
   --learning_rate 0.0003
 
-uv run main.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
-uv run main.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
+uv run main_pretrain.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
+uv run main_pretrain.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
 ```
 
-Training logs, checkpoints, and run configs are written to `output/<timestamp>/`.
+Training logs and run configs are written to `output/<timestamp>/`. Resumable pre-training checkpoints are written every 1B consumed tokens to `checkpoints/pretrain/qwen25_coder_05b_<N>b.pt`; a new run automatically resumes from the latest matching checkpoint and continues with `shuffle=False`.

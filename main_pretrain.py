@@ -1,7 +1,8 @@
 import torch
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 import os
+import re
 import csv
 import json
 import argparse
@@ -27,6 +28,9 @@ VOCAB_SIZE     = 32768
 SPECIAL_TOKENS = ["<|endoftext|>"]
 TOKEN_BUDGET   = 7_000_000_000 # 0 = disabled (epoch mode), >0 = token-budget mode
 VAL_TOKENS     = 262_144    # 8 val batches at batch_size=32, context_length=1024.
+CHECKPOINT_INTERVAL_TOKENS = 1_000_000_000
+CHECKPOINT_DIR    = "./checkpoints/pretrain"
+CHECKPOINT_PREFIX = "qwen25_coder_05b"
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
@@ -41,7 +45,7 @@ rope_base      = 1_000_000.0
 # ── Training ──────────────────────────────────────────────────────────────────
 batch_size     = 32
 learning_rate  = 3e-4
-eval_interval  = 50    # log every N steps
+eval_interval  = 1000    # log every N steps
 
 
 @torch.no_grad()
@@ -119,6 +123,60 @@ def tokenize_batch(batch, tokenizer_path, eos_id):
         flat.extend(ids)
     return {"ids": [flat]}
 
+def checkpoint_path(checkpoint_index):
+    return os.path.join(CHECKPOINT_DIR, f"{CHECKPOINT_PREFIX}_{checkpoint_index}b.pt")
+
+def find_latest_checkpoint():
+    if not os.path.exists(CHECKPOINT_DIR):
+        return None
+
+    pattern = re.compile(rf"^{re.escape(CHECKPOINT_PREFIX)}_(\d+)b\.pt$")
+    candidates = []
+    for filename in os.listdir(CHECKPOINT_DIR):
+        match = pattern.match(filename)
+        if match:
+            candidates.append((int(match.group(1)), os.path.join(CHECKPOINT_DIR, filename)))
+
+    if not candidates:
+        return None
+    return max(candidates, key=lambda item: item[0])
+
+def save_training_checkpoint(model, optimizer, scheduler, checkpoint_index, step,
+                             tokens_seen, best_val_ppl, no_improve, total_steps_est, total_params):
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    path = checkpoint_path(checkpoint_index)
+    torch.save({
+        "model_state_dict": model.state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "step": step,
+        "tokens_seen": tokens_seen,
+        "checkpoint_index": checkpoint_index,
+        "best_val_ppl": best_val_ppl,
+        "no_improve": no_improve,
+        "total_steps": total_steps_est,
+        "total_params": total_params,
+        "model_config": {
+            "architecture_reference": ARCHITECTURE_REFERENCE,
+            "context_length": context_length,
+            "d_model": d_model,
+            "swiglu_d": swiglu_d,
+            "num_heads": num_heads,
+            "num_key_value_heads": num_key_value_heads,
+            "num_layers": num_layers,
+            "rope_base": rope_base,
+            "vocab_size": VOCAB_SIZE,
+        },
+        "training_config": {
+            "batch_size": batch_size,
+            "learning_rate": learning_rate,
+            "token_budget": TOKEN_BUDGET,
+            "checkpoint_interval_tokens": CHECKPOINT_INTERVAL_TOKENS,
+        },
+    }, path)
+    print(f"Checkpoint saved -> {path} ({tokens_seen:,} tokens)")
+    return path
+
 def main():
 
     # ── Timestamp & output dir ────────────────────────────────────────────────
@@ -184,7 +242,6 @@ def main():
     train_dataset = LMDataset(token_ids[:split], context_length)
     val_dataset   = LMDataset(token_ids[split:], context_length)
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, persistent_workers=True)
     val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
 
     print(f"Train: {len(train_dataset):,} samples, Val: {len(val_dataset):,} samples")
@@ -209,7 +266,7 @@ def main():
 
     # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
     tokens_per_step = batch_size * context_length
-    total_steps_est = ((TOKEN_BUDGET + tokens_per_step - 1) // tokens_per_step) if TOKEN_BUDGET > 0 else len(train_loader)
+    total_steps_est = ((TOKEN_BUDGET + tokens_per_step - 1) // tokens_per_step) if TOKEN_BUDGET > 0 else ((len(train_dataset) + batch_size - 1) // batch_size)
     
     # Calculate warmup steps (e.g., 2% of total steps)
     warmup_steps = max(1, int(0.02 * total_steps_est))
@@ -227,6 +284,36 @@ def main():
         milestones=[warmup_steps]
     )
 
+    step = 0
+    best_val_ppl = float("inf")
+    no_improve = 0
+    tokens_seen = 0
+    resume_checkpoint = find_latest_checkpoint()
+    resume_checkpoint_path = None
+
+    if resume_checkpoint is None:
+        print("No pretrain checkpoint found; training from scratch")
+    else:
+        checkpoint_index, resume_checkpoint_path = resume_checkpoint
+        print(f"Loading checkpoint {checkpoint_index}b from {resume_checkpoint_path} ...")
+        checkpoint = torch.load(resume_checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        step = int(checkpoint.get("step", 0))
+        tokens_seen = int(checkpoint.get("tokens_seen", step * tokens_per_step))
+        best_val_ppl = checkpoint.get("best_val_ppl", best_val_ppl)
+        no_improve = int(checkpoint.get("no_improve", 0))
+        print(f"Resuming at step {step:,}, tokens_seen={tokens_seen:,}")
+
+    start_sample = min(tokens_seen // context_length, len(train_dataset))
+    if start_sample > 0:
+        print(f"Skipping {start_sample:,} already-seen training samples")
+    train_subset = Subset(train_dataset, range(start_sample, len(train_dataset)))
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    next_checkpoint_index = tokens_seen // CHECKPOINT_INTERVAL_TOKENS + 1
+
     # ── Training log CSV ──────────────────────────────────────────────────────
     log_path = os.path.join(run_dir, f"training_log_{timestamp}.csv")
     log_file = open(log_path, "w", newline="")
@@ -235,14 +322,11 @@ def main():
 
     print("Training ...")
     model.train()
-    step = 0
-    best_val_ppl = float("inf")
-    no_improve = 0
+    train_ppl = None
 
-    tokens_seen = 0
-
-    done_training = False
-    while not done_training:
+    if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
+        print(f"Token budget already reached by checkpoint ({tokens_seen:,} tokens)")
+    else:
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
             loss = model(xb, yb)
@@ -251,9 +335,10 @@ def main():
             optimizer.step()
             scheduler.step()
             step += 1
-            tokens_seen += tokens_per_step
+            tokens_seen += xb.numel()
+            train_ppl = torch.exp(torch.tensor(loss.item())).item()
+
             if step % eval_interval == 0:
-                train_ppl = torch.exp(torch.tensor(loss.item())).item()
                 val_ppl   = compute_perplexity(model, val_loader)
                 current_lr = optimizer.param_groups[0]["lr"]
                 print(
@@ -277,27 +362,47 @@ def main():
                 else:
                     no_improve += 1
 
+            while next_checkpoint_index * CHECKPOINT_INTERVAL_TOKENS <= tokens_seen:
+                save_training_checkpoint(
+                    model=model,
+                    optimizer=optimizer,
+                    scheduler=scheduler,
+                    checkpoint_index=next_checkpoint_index,
+                    step=step,
+                    tokens_seen=tokens_seen,
+                    best_val_ppl=best_val_ppl,
+                    no_improve=no_improve,
+                    total_steps_est=total_steps_est,
+                    total_params=total_params,
+                )
+                next_checkpoint_index += 1
+
             if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
                 print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
-                done_training = True
                 break
-
-        if TOKEN_BUDGET <= 0:
-            done_training = True
+        else:
+            if TOKEN_BUDGET > 0 and tokens_seen < TOKEN_BUDGET:
+                print(f"Training data exhausted at {tokens_seen:,} tokens before token budget {TOKEN_BUDGET:,}")
 
     log_file.close()
 
     # Final eval
     val_ppl   = compute_perplexity(model, val_loader)
-    print(f"Final — Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f}")
+    if train_ppl is None:
+        print(f"Final — Val PPL: {val_ppl:.2f}")
+    else:
+        print(f"Final — Train PPL: {train_ppl:.2f} | Val PPL: {val_ppl:.2f}")
 
     # ── Save model ────────────────────────────────────────────────────────────
     model_path = os.path.join(run_dir, f"model_{timestamp}.pt")
     torch.save({
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
         "step": step,
+        "tokens_seen": tokens_seen,
         "best_val_ppl": best_val_ppl,
+        "no_improve": no_improve,
     }, model_path)
     print(f"Model saved → {model_path}")
 
@@ -356,6 +461,10 @@ def main():
             "tokens_seen": tokens_seen,
             "final_step": step,
             "total_steps": total_steps_est,
+            "checkpoint_dir": CHECKPOINT_DIR,
+            "checkpoint_prefix": CHECKPOINT_PREFIX,
+            "checkpoint_interval_tokens": CHECKPOINT_INTERVAL_TOKENS,
+            "resumed_from": resume_checkpoint_path,
             "best_val_ppl": best_val_ppl,
             "final_train_ppl": train_ppl,
             "final_val_ppl": val_ppl,

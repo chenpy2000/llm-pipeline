@@ -57,6 +57,18 @@ Added grouped-query attention, using 14 query heads and 2 shared key-value heads
 
 Added BF16 mixed-precision training on supported CUDA GPUs for faster training.
 
+### Library Replacement
+
+This phase also starts a library-replacement refactor. The goal is not to abandon the from-scratch learning path, but to replace fragile low-level pieces once they become bottlenecks for the coding-agent target.
+
+The reasons are:
+
+1. I want to build a coding agent, and the current 0.5B-scale model lies at the ultimate lower bound for usefulness in that direction.
+2. Even that lower-bound pre-training target requires about 7B tokens, which goes beyond what a personal computer can comfortably prepare, store, and feed through the current pipeline.
+3. Fragility has already appeared in the data-engineering layer of this PyTorch-grounded low-level project, so tokenizer, dataset, attention, and training infrastructure need framework support before larger runs.
+
+The framework changes will be listed below as they are selected and implemented. For the raw data pre-training reference, see the [`2_pretrain_raw` branch](https://github.com/chenpy2000/llm-pipeline/tree/2_pretrain_raw).
+
 ## Active Code
 
 | Path | Purpose |

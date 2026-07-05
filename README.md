@@ -59,9 +59,12 @@ Added BF16 mixed-precision training on supported CUDA GPUs for faster training.
 
 ## Active Code
 
+There are two pre-training entry points. `main_pretrain.py` downloads the dataset first, tokenizes the full corpus, caches the token tensor, and then starts training. `main_pretrain_stream.py` streams the dataset, tokenizes batches on the fly, and trains in real time without requiring a full pre-tokenized corpus upfront.
+
 | Path | Purpose |
 |---|---|
 | `main_pretrain.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
+| `main_pretrain_stream.py` | Streaming pre-training entry point that tokenizes data on the fly |
 | `transformer.py` | Decoder-only transformer model |
 | `tokenizer.py` | BPE tokenizer implementation |
 | `dataset.py` | Causal language-modeling dataset |

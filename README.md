@@ -55,6 +55,8 @@ Replaced the ReLU feed-forward network with a SwiGLU FFN.
 
 Added grouped-query attention, using 14 query heads and 2 shared key-value heads in each decoder layer.
 
+Added BF16 mixed-precision training on supported CUDA GPUs for faster training.
+
 ## Active Code
 
 | Path | Purpose |

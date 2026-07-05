@@ -43,9 +43,19 @@ num_layers     = 24         # number of transformer layers
 rope_base      = 1_000_000.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size     = 32
+batch_size     = 16
 learning_rate  = 3e-4
 eval_interval  = 1000    # log every N steps
+training_dtype = torch.bfloat16
+use_mixed_precision = device.type == "cuda" and torch.cuda.is_bf16_supported()
+
+
+def bf16_autocast():
+    return torch.autocast(
+        device_type=device.type,
+        dtype=training_dtype,
+        enabled=use_mixed_precision,
+    )
 
 
 @torch.no_grad()
@@ -57,7 +67,8 @@ def compute_perplexity(decoderLMmodel, data_loader):
     losses = []
     for X, Y in data_loader:
         X, Y = X.to(device), Y.to(device)
-        loss = decoderLMmodel(X, Y) # your model should be computing the cross entropy loss
+        with bf16_autocast():
+            loss = decoderLMmodel(X, Y) # your model should be computing the cross entropy loss
         losses.append(loss.item())
 
     losses = torch.tensor(losses)
@@ -77,7 +88,8 @@ def generate(model, tokenizer, prompt, max_new_tokens=300, temperature=0.1):
     for _ in range(max_new_tokens):
         # Crop to block_size if the sequence gets too long
         x_cond = x[:, -context_length:]
-        logits = model(x_cond)                        # no targets → returns logits
+        with bf16_autocast():
+            logits = model(x_cond)                    # no targets → returns logits
         logits = logits[:, -1, :] / temperature       # last position only
         probs = torch.softmax(logits, dim=-1)
         next_id = torch.multinomial(probs, num_samples=1)
@@ -170,6 +182,8 @@ def save_training_checkpoint(model, optimizer, scheduler, checkpoint_index, step
         "training_config": {
             "batch_size": batch_size,
             "learning_rate": learning_rate,
+            "training_dtype": str(training_dtype).replace("torch.", ""),
+            "mixed_precision": use_mixed_precision,
             "token_budget": TOKEN_BUDGET,
             "checkpoint_interval_tokens": CHECKPOINT_INTERVAL_TOKENS,
         },
@@ -258,6 +272,7 @@ def main():
     print("Model Summary:")
     print(f"  Layers: {num_layers} | Q Heads: {num_heads} | KV Heads: {num_key_value_heads} | Context: {context_length}")
     print(f"  d_model: {d_model} | swiglu_d: {swiglu_d} | RoPE base: {rope_base:g}")
+    print(f"  Training dtype: {str(training_dtype).replace('torch.', '')} | Mixed precision: {use_mixed_precision}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
 
@@ -329,7 +344,8 @@ def main():
     else:
         for xb, yb in train_loader:
             xb, yb = xb.to(device), yb.to(device)
-            loss = model(xb, yb)
+            with bf16_autocast():
+                loss = model(xb, yb)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
@@ -456,6 +472,8 @@ def main():
         "training": {
             "batch_size": batch_size,
             "learning_rate": learning_rate,
+            "training_dtype": str(training_dtype).replace("torch.", ""),
+            "mixed_precision": use_mixed_precision,
             "eval_interval": eval_interval,
             "token_budget": TOKEN_BUDGET,
             "tokens_seen": tokens_seen,

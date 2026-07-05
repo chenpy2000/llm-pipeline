@@ -22,19 +22,20 @@ ENCODE_WORKERS    = max(1, cpu_count - 1)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
-NUM_DOCS       = 200_000    # Good starting point for a 32k tokenizer on a workstation CPU.
+NUM_DOCS       = 9_672_101  # Max documents in FineWeb-EDU sample-10BT.
 VOCAB_SIZE     = 32768
 SPECIAL_TOKENS = ["<|endoftext|>"]
-TOKEN_BUDGET   = 20_000_000 # 0 = disabled (epoch mode), >0 = Chinchilla mode
-VAL_TOKENS     = 1_000_000  # val_tokens = min(VAL_TOKENS, len(token_ids) // 10)
+TOKEN_BUDGET   = 7_000_000_000 # 0 = disabled (epoch mode), >0 = token-budget mode
+VAL_TOKENS     = 262_144    # 8 val batches at batch_size=32, context_length=1024.
 
 # ── Model ─────────────────────────────────────────────────────────────────────
-ARCHITECTURE_REFERENCE = "Qwen 2.5-Coder"
+ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
 context_length = 1024       # maximum sequence length
-d_model        = 1536       # embedding dimension
-swiglu_d       = 8960       # SwiGLU hidden dimension
-num_heads      = 12         # number of attention heads
-num_layers     = 28         # number of transformer layers
+d_model        = 896        # embedding dimension
+swiglu_d       = 4864       # SwiGLU hidden dimension
+num_heads      = 14         # number of attention heads
+num_key_value_heads = 2     # number of grouped-query attention KV heads
+num_layers     = 24         # number of transformer layers
 rope_base      = 1_000_000.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
@@ -72,7 +73,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=300, temperature=0.1):
     for _ in range(max_new_tokens):
         # Crop to block_size if the sequence gets too long
         x_cond = x[:, -context_length:]
-        logits, _ = model(x_cond)                     # no targets → returns logits
+        logits = model(x_cond)                        # no targets → returns logits
         logits = logits[:, -1, :] / temperature       # last position only
         probs = torch.softmax(logits, dim=-1)
         next_id = torch.multinomial(probs, num_samples=1)
@@ -192,12 +193,13 @@ def main():
     model = Decoder(vocab_size=tokenizer.vocab_size,
                     d_model=d_model,
                     n_head=num_heads,
+                    n_kv_head=num_key_value_heads,
                     swiglu_d=swiglu_d,
                     n_layer=num_layers,
                     rope_base=rope_base)
     
     print("Model Summary:")
-    print(f"  Layers: {num_layers} | Heads: {num_heads} | Context: {context_length}")
+    print(f"  Layers: {num_layers} | Q Heads: {num_heads} | KV Heads: {num_key_value_heads} | Context: {context_length}")
     print(f"  d_model: {d_model} | swiglu_d: {swiglu_d} | RoPE base: {rope_base:g}")
     total_params = sum(p.numel() for p in model.parameters())
     print(f"  Total parameters: {total_params:,}")
@@ -206,7 +208,8 @@ def main():
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
     # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
-    total_steps_est = (TOKEN_BUDGET // (batch_size * context_length)) if TOKEN_BUDGET > 0 else len(train_loader)
+    tokens_per_step = batch_size * context_length
+    total_steps_est = ((TOKEN_BUDGET + tokens_per_step - 1) // tokens_per_step) if TOKEN_BUDGET > 0 else len(train_loader)
     
     # Calculate warmup steps (e.g., 2% of total steps)
     warmup_steps = max(1, int(0.02 * total_steps_est))
@@ -236,46 +239,51 @@ def main():
     best_val_ppl = float("inf")
     no_improve = 0
 
-    tokens_per_step = batch_size * context_length
     tokens_seen = 0
 
-    for xb, yb in train_loader:
-        xb, yb = xb.to(device), yb.to(device)
-        loss = model(xb, yb)
-        optimizer.zero_grad()
-        loss.backward()
-        optimizer.step()
-        scheduler.step()
-        step += 1
-        tokens_seen += tokens_per_step
-        if step % eval_interval == 0:
-            train_ppl = torch.exp(torch.tensor(loss.item())).item()
-            val_ppl   = compute_perplexity(model, val_loader)
-            current_lr = optimizer.param_groups[0]["lr"]
-            print(
-                f"Step {step}/{len(train_loader)} | "
-                f"Tokens: {tokens_seen:,} | "
-                f"LR: {current_lr:.2e} | "
-                f"Loss: {loss.item():.4f} | "
-                f"Train PPL: {train_ppl:.2f} | "
-                f"Val PPL: {val_ppl:.2f}"
-            )
+    done_training = False
+    while not done_training:
+        for xb, yb in train_loader:
+            xb, yb = xb.to(device), yb.to(device)
+            loss = model(xb, yb)
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            step += 1
+            tokens_seen += tokens_per_step
+            if step % eval_interval == 0:
+                train_ppl = torch.exp(torch.tensor(loss.item())).item()
+                val_ppl   = compute_perplexity(model, val_loader)
+                current_lr = optimizer.param_groups[0]["lr"]
+                print(
+                    f"Step {step}/{total_steps_est} | "
+                    f"Tokens: {tokens_seen:,} | "
+                    f"LR: {current_lr:.2e} | "
+                    f"Loss: {loss.item():.4f} | "
+                    f"Train PPL: {train_ppl:.2f} | "
+                    f"Val PPL: {val_ppl:.2f}"
+                )
 
-            # Log to CSV
-            log_writer.writerow([step, len(train_loader), f"{loss.item():.6f}",
-                                 f"{train_ppl:.4f}", f"{val_ppl:.4f}", f"{current_lr:.6e}"])
-            log_file.flush()
+                # Log to CSV
+                log_writer.writerow([step, total_steps_est, f"{loss.item():.6f}",
+                                     f"{train_ppl:.4f}", f"{val_ppl:.4f}", f"{current_lr:.6e}"])
+                log_file.flush()
 
-            # Early Stop configs below
-            if val_ppl < best_val_ppl:
-                best_val_ppl = val_ppl
-                no_improve = 0
-            else:
-                no_improve += 1
+                # Early Stop configs below
+                if val_ppl < best_val_ppl:
+                    best_val_ppl = val_ppl
+                    no_improve = 0
+                else:
+                    no_improve += 1
 
-        if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
-            print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
-            break
+            if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
+                print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
+                done_training = True
+                break
+
+        if TOKEN_BUDGET <= 0:
+            done_training = True
 
     log_file.close()
 
@@ -334,6 +342,7 @@ def main():
             "d_model": d_model,
             "swiglu_d": swiglu_d,
             "num_heads": num_heads,
+            "num_key_value_heads": num_key_value_heads,
             "num_layers": num_layers,
             "rope_base": rope_base,
             "total_params": total_params,
@@ -346,7 +355,7 @@ def main():
             "token_budget": TOKEN_BUDGET,
             "tokens_seen": tokens_seen,
             "final_step": step,
-            "total_steps": len(train_loader),
+            "total_steps": total_steps_est,
             "best_val_ppl": best_val_ppl,
             "final_train_ppl": train_ppl,
             "final_val_ppl": val_ppl,
@@ -366,6 +375,7 @@ if __name__ == "__main__":
     parser.add_argument("--d_model",       type=int,   default=None)
     parser.add_argument("--num_layers",    type=int,   default=None)
     parser.add_argument("--num_heads",     type=int,   default=None)
+    parser.add_argument("--num_key_value_heads", type=int, default=None)
     parser.add_argument("--swiglu_d",      type=int,   default=None)
     parser.add_argument("--rope_base",     type=float, default=None)
     parser.add_argument("--num_docs",      type=int,   default=None)
@@ -380,6 +390,7 @@ if __name__ == "__main__":
     if args.d_model       is not None: d_model       = args.d_model
     if args.num_layers    is not None: num_layers    = args.num_layers
     if args.num_heads     is not None: num_heads     = args.num_heads
+    if args.num_key_value_heads is not None: num_key_value_heads = args.num_key_value_heads
     if args.swiglu_d      is not None: swiglu_d      = args.swiglu_d
     if args.rope_base     is not None: rope_base     = args.rope_base
     if args.num_docs      is not None: NUM_DOCS      = args.num_docs

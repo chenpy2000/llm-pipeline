@@ -32,7 +32,7 @@ For the detailed experiment record, including the original README, sweep scripts
 
 The next phase starts here. The goal is to move from a general pre-trained base model toward a coding-oriented assistant model.
 
-Current training target: train a coding base model that references the Qwen 2.5-Coder architecture. The active `main.py` defaults now use `d_model=1536`, `num_layers=28`, `num_heads=12`, `swiglu_d=8960`, `vocab_size=32768`, `rope_base=1000000`, and `learning_rate=0.0003`.
+Current training target: train a coding base model that references the Qwen2.5-Coder-0.5B architecture. The active `main.py` defaults now use `d_model=896`, `num_layers=24`, `num_heads=14`, `num_key_value_heads=2`, `swiglu_d=4864`, `vocab_size=32768`, `rope_base=1000000`, and `learning_rate=0.0003`.
 
 Post-training work will focus on:
 
@@ -52,6 +52,8 @@ Added tied embeddings by sharing the token embedding weights with the output pro
 Replaced LayerNorm with RMSNorm throughout the decoder.
 
 Replaced the ReLU feed-forward network with a SwiGLU FFN.
+
+Added grouped-query attention, using 14 query heads and 2 shared key-value heads in each decoder layer.
 
 ## Active Code
 
@@ -83,10 +85,11 @@ Useful overrides:
 
 ```bash
 uv run main.py \
-  --d_model 1536 \
-  --num_layers 28 \
-  --num_heads 12 \
-  --swiglu_d 8960 \
+  --d_model 896 \
+  --num_layers 24 \
+  --num_heads 14 \
+  --num_key_value_heads 2 \
+  --swiglu_d 4864 \
   --vocab_size 32768 \
   --rope_base 1000000 \
   --learning_rate 0.0003

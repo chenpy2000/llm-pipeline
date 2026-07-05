@@ -1,5 +1,5 @@
 import torch
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset, IterableDataset
 from torch.optim.lr_scheduler import LinearLR, CosineAnnealingLR, SequentialLR
 import os
 import re
@@ -10,16 +10,17 @@ from datetime import datetime
 
 from tokenizer import Tokenizer
 from datasets import load_dataset
-from dataset import LMDataset
 
 from transformer import Decoder
 
 # ── System ────────────────────────────────────────────────────────────────────
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cpu_count   = os.cpu_count() or 1
-num_workers = 4
+# Keep this at zero for the simple stateful streaming implementation below.
+# Multiple workers require per-worker dataset-state checkpointing.
+num_workers = 0
 TOKENIZER_WORKERS = max(1, cpu_count - 1)
-ENCODE_WORKERS    = max(1, cpu_count - 1)
+ENCODE_WORKERS    = max(1, cpu_count - 1)  # retained for CLI compatibility; unused
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
@@ -43,7 +44,7 @@ num_layers     = 24         # number of transformer layers
 rope_base      = 1_000_000.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size     = 16
+batch_size     = 4
 learning_rate  = 3e-4
 eval_interval  = 1000    # log every N steps
 training_dtype = torch.bfloat16
@@ -98,42 +99,133 @@ def generate(model, tokenizer, prompt, max_new_tokens=300, temperature=0.1):
     model.train()
     return tokenizer.decode(x.squeeze(0).tolist())
 
-def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
-    """
-    Load FineWeb-EDU documents, downloading and caching locally on first run.
-
-    Returns:
-        list[str] — raw document texts (no separator tokens yet)
-    """
-    cache_path = os.path.join(data_dir, f"cached_{num_docs}")
-
-    if os.path.exists(cache_path):
-        print(f"Loading cached dataset from {cache_path} ...")
-        from datasets import load_from_disk
-        ds = load_from_disk(cache_path)
-    else:
-        print(f"Downloading FineWeb-EDU ({num_docs:,} docs) ...")
-        ds = load_dataset(
-            "HuggingFaceFW/fineweb-edu",
-            name="sample-10BT",
-            split=f"train[:{num_docs}]",
-            cache_dir=data_dir,
-        )
-        os.makedirs(cache_path, exist_ok=True)
-        ds.save_to_disk(cache_path)
-        print(f"Cached to {cache_path}")
-
-    print(f"Loaded {len(ds):,} documents")
+def load_data(num_docs=NUM_DOCS):
+    """Return a lazy FineWeb-EDU stream; dataset shards are not cached locally."""
+    ds = load_dataset(
+        "HuggingFaceFW/fineweb-edu",
+        name="sample-10BT",
+        split="train",
+        streaming=True,
+    )
+    if num_docs is not None and num_docs > 0:
+        ds = ds.take(num_docs)
     return ds
 
-def tokenize_batch(batch, tokenizer_path, eos_id):
-    tok = Tokenizer.load(tokenizer_path)
-    flat = []
-    for text in batch["text"]:
-        ids = tok.encode(text)
-        ids.append(eos_id)
-        flat.extend(ids)
-    return {"ids": [flat]}
+
+class TokenBlockDataset(Dataset):
+    """Small map-style dataset used only for the in-memory validation tokens."""
+
+    def __init__(self, token_ids, block_size):
+        self.token_ids = token_ids
+        self.block_size = block_size
+
+    def __len__(self):
+        return max(0, (len(self.token_ids) - 1) // self.block_size)
+
+    def __getitem__(self, index):
+        start = index * self.block_size
+        chunk = self.token_ids[start:start + self.block_size + 1]
+        return chunk[:-1], chunk[1:]
+
+
+class StreamingLMDataset(IterableDataset):
+    """Tokenize streamed documents and emit contiguous next-token blocks.
+
+    With num_workers=0, state_dict() captures both the Hugging Face stream
+    position and the unconsumed token buffer, so checkpoint resume does not
+    need to replay the whole dataset.
+    """
+
+    def __init__(self, source, tokenizer_path, eos_id, block_size, skip_blocks=0):
+        super().__init__()
+        self.source = source
+        self.tokenizer_path = tokenizer_path
+        self.eos_id = eos_id
+        self.block_size = block_size
+        self.skip_blocks = skip_blocks
+        self.token_buffer = []
+        self.buffer_start = 0
+        self.blocks_emitted = 0
+
+    def __iter__(self):
+        tokenizer = Tokenizer.load(self.tokenizer_path)
+
+        for example in self.source:
+            ids = tokenizer.encode(example["text"])
+            self.token_buffer.extend(ids)
+            self.token_buffer.append(self.eos_id)
+
+            while len(self.token_buffer) - self.buffer_start >= self.block_size + 1:
+                start = self.buffer_start
+                end = start + self.block_size + 1
+                chunk = self.token_buffer[start:end]
+
+                # Advance state before yielding. With num_workers=0, a checkpoint
+                # taken after a batch then points exactly after that batch.
+                self.buffer_start += self.block_size
+                self.blocks_emitted += 1
+
+                if self.buffer_start >= 65_536:
+                    self.token_buffer = self.token_buffer[self.buffer_start:]
+                    self.buffer_start = 0
+
+                if self.skip_blocks > 0:
+                    self.skip_blocks -= 1
+                    continue
+
+                block = torch.tensor(chunk, dtype=torch.long)
+                yield block[:-1], block[1:]
+
+    def state_dict(self):
+        source_state = self.source.state_dict() if hasattr(self.source, "state_dict") else None
+        return {
+            "source_state": source_state,
+            "token_buffer": self.token_buffer[self.buffer_start:],
+            "blocks_emitted": self.blocks_emitted,
+            "skip_blocks": self.skip_blocks,
+        }
+
+    def load_state_dict(self, state_dict):
+        source_state = state_dict.get("source_state")
+        if source_state is not None and hasattr(self.source, "load_state_dict"):
+            self.source.load_state_dict(source_state)
+            self.token_buffer = list(state_dict.get("token_buffer", []))
+            self.buffer_start = 0
+            self.blocks_emitted = int(state_dict.get("blocks_emitted", 0))
+            self.skip_blocks = int(state_dict.get("skip_blocks", 0))
+        else:
+            # Compatibility fallback for older `datasets` versions: replay the
+            # stream and skip already-consumed blocks instead of restoring a
+            # shard/example cursor.
+            self.token_buffer = []
+            self.buffer_start = 0
+            self.blocks_emitted = 0
+            self.skip_blocks = int(state_dict.get("blocks_emitted", 0))
+
+
+def build_validation_dataset(tokenizer, eos_id):
+    """Read only enough streamed documents to hold VAL_TOKENS in RAM."""
+    token_ids = []
+    docs_used = 0
+
+    for example in load_data(NUM_DOCS):
+        token_ids.extend(tokenizer.encode(example["text"]))
+        token_ids.append(eos_id)
+        docs_used += 1
+        if len(token_ids) >= VAL_TOKENS + 1:
+            break
+
+    num_blocks = min(
+        VAL_TOKENS // context_length,
+        max(0, (len(token_ids) - 1) // context_length),
+    )
+    if num_blocks == 0:
+        raise RuntimeError("Not enough streamed text to construct one validation block")
+
+    keep_tokens = num_blocks * context_length + 1
+    val_tensor = torch.tensor(token_ids[:keep_tokens], dtype=torch.long)
+    return TokenBlockDataset(val_tensor, context_length), docs_used, keep_tokens - 1
+
 
 def checkpoint_path(checkpoint_index):
     return os.path.join(CHECKPOINT_DIR, f"{CHECKPOINT_PREFIX}_{checkpoint_index}b.pt")
@@ -153,14 +245,16 @@ def find_latest_checkpoint():
         return None
     return max(candidates, key=lambda item: item[0])
 
-def save_training_checkpoint(model, optimizer, scheduler, checkpoint_index, step,
-                             tokens_seen, best_val_ppl, no_improve, total_steps_est, total_params):
+def save_training_checkpoint(model, optimizer, scheduler, train_dataset,
+                             checkpoint_index, step, tokens_seen, best_val_ppl,
+                             no_improve, total_steps_est, total_params):
     os.makedirs(CHECKPOINT_DIR, exist_ok=True)
     path = checkpoint_path(checkpoint_index)
     torch.save({
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
+        "data_state_dict": train_dataset.state_dict(),
         "step": step,
         "tokens_seen": tokens_seen,
         "checkpoint_index": checkpoint_index,
@@ -199,66 +293,32 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
     print(f"Run output → {run_dir}")
 
-    print("Loading Dataset")
-    ds = load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS)
-
     print("Loading Tokenizer")
     tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-    if os.path.exists(tokenizer_path):
-        tokenizer = Tokenizer.load(tokenizer_path)
-        print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
-    else:
-        print("No saved tokenizer found, training a new one ...")
-        tokenizer = Tokenizer.train(
-            ds["text"],
-            vocab_size=VOCAB_SIZE,
-            special_tokens=SPECIAL_TOKENS,
-            num_workers=TOKENIZER_WORKERS,
+    if not os.path.exists(tokenizer_path):
+        raise FileNotFoundError(
+            f"Streaming pretraining expects an existing tokenizer at {tokenizer_path}. "
+            "Train/save the tokenizer once before launching this script."
         )
-        os.makedirs("tokenizer", exist_ok=True)
-        tokenizer.save(tokenizer_path)
-        print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
-    # ── Encode (cached) ──────────────────────────────────────────────────────
-
-    encoded_dir = "encoded"
-    os.makedirs(encoded_dir, exist_ok=True)
-    encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
-
+    tokenizer = Tokenizer.load(tokenizer_path)
+    print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
     eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
-    num_proc = max(1, min(ENCODE_WORKERS, len(ds)))
 
-    if os.path.exists(encoded_path):
-        print(f"Loading cached tokens from {encoded_path} ...")
-        token_ids = torch.load(encoded_path)
-    else:
-        print(f"Tokenizing {len(ds):,} docs with {num_proc} workers ...")
-        ds_tok = ds.map(
-            tokenize_batch,
-            batched=True,
-            batch_size=500,
-            num_proc=num_proc,
-            remove_columns=ds.column_names,
-            fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
-            desc="Tokenizing",
-        )
-        ds_tok.set_format("torch")
-        token_ids = torch.cat([row["ids"] for row in ds_tok])
-        torch.save(token_ids, encoded_path)
-        print(f"Cached tokens to {encoded_path}")
-
-    total_tokens = len(token_ids)                 # ← add this
-    print(f"Total tokens: {total_tokens:,}")      # ← and this if you want the log line back
-
-    # Train/Valid split
-    val_tokens = min(VAL_TOKENS, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
-    split = len(token_ids) - val_tokens
-    train_dataset = LMDataset(token_ids[:split], context_length)
-    val_dataset   = LMDataset(token_ids[split:], context_length)
-
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
-
-    print(f"Train: {len(train_dataset):,} samples, Val: {len(val_dataset):,} samples")
+    print(f"Streaming FineWeb-EDU (up to {NUM_DOCS:,} documents)")
+    print(f"Building an in-memory validation set of {VAL_TOKENS:,} tokens ...")
+    val_dataset, val_docs_used, validation_tokens = build_validation_dataset(tokenizer, eos_id)
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
+    print(
+        f"Validation: {len(val_dataset):,} samples / {validation_tokens:,} tokens "
+        f"from {val_docs_used:,} streamed documents"
+    )
 
     # Loading Model
     model = Decoder(vocab_size=tokenizer.vocab_size,
@@ -279,9 +339,11 @@ def main():
     model.to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
 
-    # Cosine LR scheduler (matched to token budget, or one epoch if no budget)
+    # A stream has no cheap len(), so schedule training by token budget.
+    if TOKEN_BUDGET <= 0:
+        raise ValueError("Streaming mode requires TOKEN_BUDGET > 0")
     tokens_per_step = batch_size * context_length
-    total_steps_est = ((TOKEN_BUDGET + tokens_per_step - 1) // tokens_per_step) if TOKEN_BUDGET > 0 else ((len(train_dataset) + batch_size - 1) // batch_size)
+    total_steps_est = (TOKEN_BUDGET + tokens_per_step - 1) // tokens_per_step
     
     # Calculate warmup steps (e.g., 2% of total steps)
     warmup_steps = max(1, int(0.02 * total_steps_est))
@@ -305,6 +367,7 @@ def main():
     tokens_seen = 0
     resume_checkpoint = find_latest_checkpoint()
     resume_checkpoint_path = None
+    resume_data_state = None
 
     if resume_checkpoint is None:
         print("No pretrain checkpoint found; training from scratch")
@@ -320,13 +383,37 @@ def main():
         tokens_seen = int(checkpoint.get("tokens_seen", step * tokens_per_step))
         best_val_ppl = checkpoint.get("best_val_ppl", best_val_ppl)
         no_improve = int(checkpoint.get("no_improve", 0))
+        resume_data_state = checkpoint.get("data_state_dict")
         print(f"Resuming at step {step:,}, tokens_seen={tokens_seen:,}")
 
-    start_sample = min(tokens_seen // context_length, len(train_dataset))
-    if start_sample > 0:
-        print(f"Skipping {start_sample:,} already-seen training samples")
-    train_subset = Subset(train_dataset, range(start_sample, len(train_dataset)))
-    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    # Reserve the first streamed documents for validation, then train on the rest.
+    train_source = load_data(NUM_DOCS).skip(val_docs_used)
+
+    # New checkpoints restore the exact stream position and token buffer. Older
+    # checkpoints fall back to replaying/skipping blocks from the beginning.
+    fallback_skip_blocks = 0 if resume_data_state is not None else tokens_seen // context_length
+    train_dataset = StreamingLMDataset(
+        source=train_source,
+        tokenizer_path=tokenizer_path,
+        eos_id=eos_id,
+        block_size=context_length,
+        skip_blocks=fallback_skip_blocks,
+    )
+    if resume_data_state is not None:
+        train_dataset.load_state_dict(resume_data_state)
+        print("Restored streaming dataset position from checkpoint")
+    elif fallback_skip_blocks > 0:
+        print(
+            f"Warning: old checkpoint has no data state; replaying and skipping "
+            f"{fallback_skip_blocks:,} blocks"
+        )
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=batch_size,
+        num_workers=0,
+        pin_memory=torch.cuda.is_available(),
+    )
     next_checkpoint_index = tokens_seen // CHECKPOINT_INTERVAL_TOKENS + 1
 
     # ── Training log CSV ──────────────────────────────────────────────────────
@@ -383,6 +470,7 @@ def main():
                     model=model,
                     optimizer=optimizer,
                     scheduler=scheduler,
+                    train_dataset=train_dataset,
                     checkpoint_index=next_checkpoint_index,
                     step=step,
                     tokens_seen=tokens_seen,
@@ -415,6 +503,7 @@ def main():
         "model_state_dict": model.state_dict(),
         "optimizer_state_dict": optimizer.state_dict(),
         "scheduler_state_dict": scheduler.state_dict(),
+        "data_state_dict": train_dataset.state_dict(),
         "step": step,
         "tokens_seen": tokens_seen,
         "best_val_ppl": best_val_ppl,
@@ -442,12 +531,14 @@ def main():
         "device": str(device),
 
         "data": {
-            "data_dir": DATA_DIR,
-            "num_docs": NUM_DOCS,
-            "total_tokens": total_tokens,
-            "train_samples": len(train_dataset),
+            "streaming": True,
+            "dataset": "HuggingFaceFW/fineweb-edu",
+            "subset": "sample-10BT",
+            "num_docs_limit": NUM_DOCS,
+            "validation_docs": val_docs_used,
+            "validation_tokens": validation_tokens,
             "val_samples": len(val_dataset),
-            "encode_workers": num_proc,
+            "stream_workers": 0,
         },
 
         "tokenizer": {

@@ -9,8 +9,8 @@ import argparse
 from datetime import datetime
 
 from tokenizer import Tokenizer
-from datasets import load_dataset
-from dataset import LMDataset
+from data_pipeline import build_or_load_tokenized_blocks, load_or_train_tokenizer
+from dataset import HFCausalLMDataset
 
 from transformer import Decoder
 
@@ -22,6 +22,14 @@ ENCODE_WORKERS    = max(1, cpu_count - 1)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
 DATA_DIR       = "./data/fineweb-edu"
+DATASET_ID     = "HuggingFaceFW/fineweb-edu"
+DATASET_CONFIG = "sample-10BT"
+DATASET_SPLIT  = "train"
+TEXT_COLUMN    = "text"
+TOKENIZED_DATA_DIR = "./data/tokenized"
+RAW_PARQUET_DIR    = "./data/raw_parquet"
+TOKENIZED_DATA_LABEL = None
+TOKENIZE_BATCH_SIZE  = 500
 NUM_DOCS       = 9_672_101  # Max documents in FineWeb-EDU sample-10BT.
 VOCAB_SIZE     = 32768
 SPECIAL_TOKENS = ["<|endoftext|>"]
@@ -98,6 +106,7 @@ def generate(model, tokenizer, prompt, max_new_tokens=300, temperature=0.1):
     return tokenizer.decode(x.squeeze(0).tolist())
 
 def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
+    raise RuntimeError("load_data was replaced by the tokenized shard cache")
     """
     Load FineWeb-EDU documents, downloading and caching locally on first run.
 
@@ -198,69 +207,72 @@ def main():
     os.makedirs(run_dir, exist_ok=True)
     print(f"Run output → {run_dir}")
 
-    print("Loading Dataset")
-    ds = load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS)
-
     print("Loading Tokenizer")
     tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-    if os.path.exists(tokenizer_path):
-        tokenizer = Tokenizer.from_file(tokenizer_path)
-        print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
-        if tokenizer.loaded_from_legacy:
-            tokenizer.save(tokenizer_path)
-            print(f"Migrated legacy tokenizer to HF format at {tokenizer_path}")
-    else:
-        print("No saved tokenizer found, training a new one ...")
-        tokenizer = Tokenizer()
-        trainer = Tokenizer.build_bpe_trainer(
-            vocab_size=VOCAB_SIZE,
-            special_tokens=SPECIAL_TOKENS,
-        )
-        tokenizer.train_from_iterator(ds["text"], trainer=trainer, length=len(ds))
-        os.makedirs("tokenizer", exist_ok=True)
-        tokenizer.save(tokenizer_path)
-        print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
+    tokenizer = load_or_train_tokenizer(
+        tokenizer_path=tokenizer_path,
+        vocab_size=VOCAB_SIZE,
+        special_tokens=SPECIAL_TOKENS,
+        dataset_id=DATASET_ID,
+        config_name=DATASET_CONFIG,
+        text_column=TEXT_COLUMN,
+        num_docs=NUM_DOCS,
+        raw_parquet_dir=RAW_PARQUET_DIR,
+        tokenized_root=TOKENIZED_DATA_DIR,
+        data_label=TOKENIZED_DATA_LABEL,
+    )
 
     # ── Encode (cached) ──────────────────────────────────────────────────────
 
-    encoded_dir = "encoded"
-    os.makedirs(encoded_dir, exist_ok=True)
-    encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
+    num_proc = max(1, min(ENCODE_WORKERS, NUM_DOCS))
+    token_blocks, data_manifest = build_or_load_tokenized_blocks(
+        dataset_id=DATASET_ID,
+        config_name=DATASET_CONFIG,
+        split=DATASET_SPLIT,
+        text_column=TEXT_COLUMN,
+        num_docs=NUM_DOCS,
+        tokenizer_path=tokenizer_path,
+        tokenizer=tokenizer,
+        vocab_size=VOCAB_SIZE,
+        special_tokens=SPECIAL_TOKENS,
+        context_length=context_length,
+        tokenized_root=TOKENIZED_DATA_DIR,
+        raw_parquet_dir=RAW_PARQUET_DIR,
+        data_label=TOKENIZED_DATA_LABEL,
+        encode_workers=num_proc,
+        tokenize_batch_size=TOKENIZE_BATCH_SIZE,
+    )
 
-    eos_id = tokenizer.token_to_id(SPECIAL_TOKENS[0])
-    if eos_id is None:
-        raise ValueError(f"Tokenizer is missing special token {SPECIAL_TOKENS[0]!r}")
-    num_proc = max(1, min(ENCODE_WORKERS, len(ds)))
-
-    if os.path.exists(encoded_path):
-        print(f"Loading cached tokens from {encoded_path} ...")
-        token_ids = torch.load(encoded_path)
-    else:
-        print(f"Tokenizing {len(ds):,} docs with {num_proc} workers ...")
-        ds_tok = ds.map(
-            tokenize_batch,
-            batched=True,
-            batch_size=500,
-            num_proc=num_proc,
-            remove_columns=ds.column_names,
-            fn_kwargs={"tokenizer_path": tokenizer_path, "eos_id": eos_id},
-            desc="Tokenizing",
-        )
-        ds_tok.set_format("torch")
-        token_ids = torch.cat([row["ids"] for row in ds_tok])
-        torch.save(token_ids, encoded_path)
-        print(f"Cached tokens to {encoded_path}")
+    block_dataset = HFCausalLMDataset(token_blocks, context_length)
+    if len(block_dataset) < 2:
+        raise ValueError("Need at least two token blocks to create train and val splits")
+    total_tokens = data_manifest["total_training_tokens"]
+    token_ids = range(total_tokens)
 
     total_tokens = len(token_ids)                 # ← add this
     print(f"Total tokens: {total_tokens:,}")      # ← and this if you want the log line back
 
-    # Train/Valid split
-    val_tokens = min(VAL_TOKENS, len(token_ids) // 10)  # ~1M tokens, or 10% for small datasets
-    split = len(token_ids) - val_tokens
-    train_dataset = LMDataset(token_ids[:split], context_length)
-    val_dataset   = LMDataset(token_ids[split:], context_length)
+    print(f"Tokenized dataset label: {data_manifest['label']}")
 
-    val_loader   = DataLoader(val_dataset,   batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    # Train/Valid split
+    val_samples = max(1, VAL_TOKENS // context_length)
+    val_samples = min(val_samples, max(1, len(block_dataset) // 10))
+    val_samples = min(val_samples, len(block_dataset) - 1)
+    split = len(block_dataset) - val_samples
+    train_dataset = Subset(block_dataset, range(split))
+    val_dataset   = Subset(block_dataset, range(split, len(block_dataset)))
+
+    loader_kwargs = {
+        "num_workers": num_workers,
+        "pin_memory": device.type == "cuda",
+        "persistent_workers": num_workers > 0,
+    }
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
 
     print(f"Train: {len(train_dataset):,} samples, Val: {len(val_dataset):,} samples")
 
@@ -330,7 +342,12 @@ def main():
     if start_sample > 0:
         print(f"Skipping {start_sample:,} already-seen training samples")
     train_subset = Subset(train_dataset, range(start_sample, len(train_dataset)))
-    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=False, num_workers=num_workers, pin_memory=True, persistent_workers=True)
+    train_loader = DataLoader(
+        train_subset,
+        batch_size=batch_size,
+        shuffle=False,
+        **loader_kwargs,
+    )
     next_checkpoint_index = tokens_seen // CHECKPOINT_INTERVAL_TOKENS + 1
 
     # ── Training log CSV ──────────────────────────────────────────────────────
@@ -447,11 +464,24 @@ def main():
 
         "data": {
             "data_dir": DATA_DIR,
+            "dataset_id": DATASET_ID,
+            "dataset_config": DATASET_CONFIG,
+            "dataset_split": DATASET_SPLIT,
+            "text_column": TEXT_COLUMN,
             "num_docs": NUM_DOCS,
             "total_tokens": total_tokens,
             "train_samples": len(train_dataset),
             "val_samples": len(val_dataset),
             "encode_workers": num_proc,
+            "tokenize_batch_size": TOKENIZE_BATCH_SIZE,
+            "tokenized_data_dir": TOKENIZED_DATA_DIR,
+            "tokenized_data_label": data_manifest["label"],
+            "tokenized_manifest_path": os.path.join(
+                TOKENIZED_DATA_DIR,
+                data_manifest["label"],
+                "manifest.json",
+            ),
+            "raw_parquet_dir": RAW_PARQUET_DIR,
         },
 
         "tokenizer": {
@@ -513,6 +543,10 @@ if __name__ == "__main__":
     parser.add_argument("--token_budget",  type=int,   default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--encode_workers",    type=int, default=None)
+    parser.add_argument("--tokenized_data_dir", type=str, default=None)
+    parser.add_argument("--raw_parquet_dir",    type=str, default=None)
+    parser.add_argument("--data_label",         type=str, default=None)
+    parser.add_argument("--tokenize_batch_size", type=int, default=None)
     args = parser.parse_args()
 
     # Override globals only if provided
@@ -527,5 +561,9 @@ if __name__ == "__main__":
     if args.token_budget  is not None: TOKEN_BUDGET  = args.token_budget
     if args.learning_rate is not None: learning_rate = args.learning_rate
     if args.encode_workers    is not None: ENCODE_WORKERS    = args.encode_workers
+    if args.tokenized_data_dir is not None: TOKENIZED_DATA_DIR = args.tokenized_data_dir
+    if args.raw_parquet_dir    is not None: RAW_PARQUET_DIR    = args.raw_parquet_dir
+    if args.data_label         is not None: TOKENIZED_DATA_LABEL = args.data_label
+    if args.tokenize_batch_size is not None: TOKENIZE_BATCH_SIZE = args.tokenize_batch_size
 
     main()

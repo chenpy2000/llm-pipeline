@@ -78,6 +78,7 @@ The remaining framework changes will be listed below as they are selected and im
 | Path | Purpose |
 |---|---|
 | `main_pretrain.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
+| `data_pipeline.py` | Raw Parquet download, tokenized shard cache, labels, and manifest loading |
 | `transformer.py` | Decoder-only transformer model |
 | `tokenizer.py` | Hugging Face Tokenizer byte-level BPE wrapper |
 | `dataset.py` | Causal language-modeling dataset |
@@ -99,6 +100,16 @@ Run the active training pipeline:
 uv run main_pretrain.py
 ```
 
+The active pre-training data flow now uses portable tokenized shards:
+
+- raw FineWeb-EDU Parquet shards are downloaded one at a time into `data/raw_parquet/`;
+- each raw shard is tokenized locally with Hugging Face `datasets.map`;
+- the tokenized blocks are saved as HF `Dataset.save_to_disk` Arrow shards under `data/tokenized/<label>/`;
+- the raw Parquet file and per-shard processing cache are deleted after that shard is saved;
+- future runs load `data/tokenized/<label>/manifest.json` directly and skip the raw download.
+
+The generated label is printed during startup and written to `label.txt` in the tokenized dataset folder. Copy the whole `data/tokenized/<label>/` folder, including `manifest.json`, `tokenizer.json`, and `shards/`, to an online drive if you want to reuse it elsewhere.
+
 Useful overrides:
 
 ```bash
@@ -114,6 +125,7 @@ uv run main_pretrain.py \
 
 uv run main_pretrain.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
 uv run main_pretrain.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
+uv run main_pretrain.py --data_label fineweb_10bt_qwen05b --tokenized_data_dir D:/tokenized-cache
 ```
 
 Training logs and run configs are written to `output/<timestamp>/`. Resumable pre-training checkpoints are written every 1B consumed tokens to `checkpoints/pretrain/qwen25_coder_05b_<N>b.pt`; a new run automatically resumes from the latest matching checkpoint and continues with `shuffle=False`.

@@ -8,6 +8,8 @@ import json
 import argparse
 from datetime import datetime
 
+from tqdm.auto import tqdm
+
 from tokenizer import Tokenizer
 from data_pipeline import build_or_load_tokenized_blocks, load_or_train_tokenizer
 from dataset import HFCausalLMDataset
@@ -363,63 +365,90 @@ def main():
     if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
         print(f"Token budget already reached by checkpoint ({tokens_seen:,} tokens)")
     else:
-        for xb, yb in train_loader:
-            xb, yb = xb.to(device), yb.to(device)
-            with bf16_autocast():
-                loss = model(xb, yb)
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
-            scheduler.step()
-            step += 1
-            tokens_seen += xb.numel()
-            train_ppl = torch.exp(torch.tensor(loss.item())).item()
-
-            if step % eval_interval == 0:
-                val_ppl   = compute_perplexity(model, val_loader)
+        progress_total_tokens = (
+            TOKEN_BUDGET
+            if TOKEN_BUDGET > 0
+            else len(train_dataset) * context_length
+        )
+        progress_initial_tokens = min(tokens_seen, progress_total_tokens)
+        with tqdm(
+            total=progress_total_tokens,
+            initial=progress_initial_tokens,
+            desc="Training",
+            unit="tok",
+            unit_scale=True,
+            dynamic_ncols=True,
+        ) as progress_bar:
+            for xb, yb in train_loader:
+                xb, yb = xb.to(device), yb.to(device)
+                with bf16_autocast():
+                    loss = model(xb, yb)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                scheduler.step()
+                step += 1
+                tokens_seen += xb.numel()
+                train_ppl = torch.exp(torch.tensor(loss.item())).item()
                 current_lr = optimizer.param_groups[0]["lr"]
-                print(
-                    f"Step {step}/{total_steps_est} | "
-                    f"Tokens: {tokens_seen:,} | "
-                    f"LR: {current_lr:.2e} | "
-                    f"Loss: {loss.item():.4f} | "
-                    f"Train PPL: {train_ppl:.2f} | "
-                    f"Val PPL: {val_ppl:.2f}"
+
+                progress_bar.update(
+                    max(0, min(tokens_seen, progress_total_tokens) - progress_bar.n)
+                )
+                progress_bar.set_postfix(
+                    step=f"{step:,}/{total_steps_est:,}",
+                    loss=f"{loss.item():.4f}",
+                    ppl=f"{train_ppl:.2f}",
+                    lr=f"{current_lr:.2e}",
+                    refresh=False,
                 )
 
-                # Log to CSV
-                log_writer.writerow([step, total_steps_est, f"{loss.item():.6f}",
-                                     f"{train_ppl:.4f}", f"{val_ppl:.4f}", f"{current_lr:.6e}"])
-                log_file.flush()
+                if step % eval_interval == 0:
+                    val_ppl   = compute_perplexity(model, val_loader)
+                    progress_bar.write(
+                        f"Step {step}/{total_steps_est} | "
+                        f"Tokens: {tokens_seen:,} | "
+                        f"LR: {current_lr:.2e} | "
+                        f"Loss: {loss.item():.4f} | "
+                        f"Train PPL: {train_ppl:.2f} | "
+                        f"Val PPL: {val_ppl:.2f}"
+                    )
 
-                # Early Stop configs below
-                if val_ppl < best_val_ppl:
-                    best_val_ppl = val_ppl
-                    no_improve = 0
-                else:
-                    no_improve += 1
+                    # Log to CSV
+                    log_writer.writerow([step, total_steps_est, f"{loss.item():.6f}",
+                                         f"{train_ppl:.4f}", f"{val_ppl:.4f}", f"{current_lr:.6e}"])
+                    log_file.flush()
 
-            while next_checkpoint_index * CHECKPOINT_INTERVAL_TOKENS <= tokens_seen:
-                save_training_checkpoint(
-                    model=model,
-                    optimizer=optimizer,
-                    scheduler=scheduler,
-                    checkpoint_index=next_checkpoint_index,
-                    step=step,
-                    tokens_seen=tokens_seen,
-                    best_val_ppl=best_val_ppl,
-                    no_improve=no_improve,
-                    total_steps_est=total_steps_est,
-                    total_params=total_params,
-                )
-                next_checkpoint_index += 1
+                    # Early Stop configs below
+                    if val_ppl < best_val_ppl:
+                        best_val_ppl = val_ppl
+                        no_improve = 0
+                    else:
+                        no_improve += 1
 
-            if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
-                print(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
-                break
-        else:
-            if TOKEN_BUDGET > 0 and tokens_seen < TOKEN_BUDGET:
-                print(f"Training data exhausted at {tokens_seen:,} tokens before token budget {TOKEN_BUDGET:,}")
+                while next_checkpoint_index * CHECKPOINT_INTERVAL_TOKENS <= tokens_seen:
+                    save_training_checkpoint(
+                        model=model,
+                        optimizer=optimizer,
+                        scheduler=scheduler,
+                        checkpoint_index=next_checkpoint_index,
+                        step=step,
+                        tokens_seen=tokens_seen,
+                        best_val_ppl=best_val_ppl,
+                        no_improve=no_improve,
+                        total_steps_est=total_steps_est,
+                        total_params=total_params,
+                    )
+                    next_checkpoint_index += 1
+
+                if TOKEN_BUDGET > 0 and tokens_seen >= TOKEN_BUDGET:
+                    progress_bar.write(f"Token budget reached at step {step} ({tokens_seen:,} tokens)")
+                    break
+            else:
+                if TOKEN_BUDGET > 0 and tokens_seen < TOKEN_BUDGET:
+                    progress_bar.write(
+                        f"Training data exhausted at {tokens_seen:,} tokens before token budget {TOKEN_BUDGET:,}"
+                    )
 
     log_file.close()
 

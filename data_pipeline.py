@@ -34,8 +34,9 @@ def write_json_atomic(path, data):
 
 
 def sanitize_label(value):
-    value = re.sub(r"[^A-Za-z0-9_.-]+", "-", value)
-    value = value.strip(".-")
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value)
+    value = value.strip("_")
     return value or "dataset"
 
 
@@ -69,34 +70,18 @@ def default_data_label(
     num_docs,
     vocab_size,
     context_length,
-    tokenizer_sha256,
-    special_tokens,
 ):
-    label_data = {
-        "pipeline_version": TOKENIZED_PIPELINE_VERSION,
-        "dataset_id": dataset_id,
-        "config_name": config_name,
-        "split": split,
-        "text_column": text_column,
-        "num_docs": num_docs,
-        "vocab_size": vocab_size,
-        "context_length": context_length,
-        "tokenizer_sha256": tokenizer_sha256,
-        "special_tokens": list(special_tokens),
-    }
-    short_hash = hashlib.sha256(
-        json.dumps(label_data, sort_keys=True).encode("utf-8")
-    ).hexdigest()[:12]
     dataset_name = dataset_id.rsplit("/", 1)[-1]
     return sanitize_label(
         f"{dataset_name}_{config_name}_{split}_docs{num_docs}_"
-        f"ctx{context_length}_v{vocab_size}_{short_hash}"
+        f"ctx{context_length}_v{vocab_size}"
     )
 
 
 def cached_tokenizer_path(tokenized_root, data_label):
     if not data_label:
         return None
+    data_label = sanitize_label(data_label)
     path = os.path.join(tokenized_root, data_label, "tokenizer.json")
     return path if os.path.exists(path) else None
 
@@ -114,6 +99,9 @@ def load_or_train_tokenizer(
     data_label=None,
     iterator_batch_size=1000,
 ):
+    if data_label:
+        data_label = sanitize_label(data_label)
+
     if os.path.exists(tokenizer_path):
         tokenizer = Tokenizer.from_file(tokenizer_path)
         print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
@@ -294,6 +282,9 @@ def build_or_load_tokenized_blocks(
     encode_workers=1,
     tokenize_batch_size=500,
 ):
+    if data_label:
+        data_label = sanitize_label(data_label)
+
     tokenizer_sha256 = file_sha256(tokenizer_path)
     label = data_label or default_data_label(
         dataset_id=dataset_id,
@@ -303,8 +294,6 @@ def build_or_load_tokenized_blocks(
         num_docs=num_docs,
         vocab_size=vocab_size,
         context_length=context_length,
-        tokenizer_sha256=tokenizer_sha256,
-        special_tokens=special_tokens,
     )
     tokenized_path = os.path.join(tokenized_root, label)
 

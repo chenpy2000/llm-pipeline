@@ -108,7 +108,7 @@ The active pre-training data flow now uses portable tokenized shards:
 - the raw Parquet file and per-shard processing cache are deleted after that shard is saved;
 - future runs load `data/tokenized/<label>/manifest.json` directly and skip the raw download.
 
-The generated label is printed during startup and written to `label.txt` in the tokenized dataset folder. Copy the whole `data/tokenized/<label>/` folder, including `manifest.json`, `tokenizer.json`, and `shards/`, to an online drive if you want to reuse it elsewhere.
+The generated label is printed during startup and written to `label.txt` in the tokenized dataset folder. Labels use only letters, numbers, and underscores, for example `fineweb_edu_sample_10BT_train_docs9672101_ctx1024_v32768`. Copy the whole `data/tokenized/<label>/` folder, including `manifest.json`, `tokenizer.json`, and `shards/`, to an online drive if you want to reuse it elsewhere.
 
 Useful overrides:
 
@@ -125,7 +125,7 @@ uv run main_pretrain.py \
 
 uv run main_pretrain.py --d_model 128 --num_layers 4 --num_heads 4 --swiglu_d 512
 uv run main_pretrain.py --num_docs 500000 --token_budget 20000000 --learning_rate 0.0012
-uv run main_pretrain.py --data_label fineweb_10bt_qwen05b --tokenized_data_dir D:/tokenized-cache
+uv run main_pretrain.py --data_label fineweb_edu_sample_10BT_train_docs9672101_ctx1024_v32768 --tokenized_data_dir D:/tokenized-cache
 ```
 
 Training logs and run configs are written to `output/<timestamp>/`. Resumable pre-training checkpoints are written every 1B consumed tokens to `checkpoints/pretrain/qwen25_coder_05b_<N>b.pt`; a new run automatically resumes from the latest matching checkpoint and continues with `shuffle=False`.

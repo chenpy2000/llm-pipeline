@@ -45,13 +45,12 @@ RESUME_TRAINING_STATE = False
 
 CPT_SOURCES = [
     {
-        "label": "stack_edu_python",
-        "dataset_id": "HuggingFaceTB/stack-edu",
-        "config_name": "Python",
+        "label": "python_edu_cleaned",
+        "dataset_id": "Avelina/python-edu-cleaned",
+        "config_name": "default",
         "split": "train",
         "text_column": "text",
-        "blob_id_column": "blob_id",
-        "token_budget": 2_750_000_000,
+        "token_budget": 2_500_000_000,
         "fim_rate": 0.30,
     },
     {

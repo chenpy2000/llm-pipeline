@@ -37,7 +37,7 @@ CHECKPOINT_PREFIX = "qwen25_coder_05b"
 # Set this to a checkpoint filename or path to start CPT from a specific model.
 # Examples:
 # CHECKPOINT_NAME = "qwen25_coder_05b_7b.pt"
-CHECKPOINT_NAME = "output/20260706_123456/model_20260706_123456.pt"
+CHECKPOINT_NAME = "output/20260706_040426/model_20260706_040426.pt"
 # CHECKPOINT_NAME = None
 
 HF_TOKEN = None

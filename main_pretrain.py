@@ -18,7 +18,6 @@ from transformer import Decoder
 device      = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 cpu_count   = os.cpu_count() or 1
 num_workers = 4
-TOKENIZER_WORKERS = max(1, cpu_count - 1)
 ENCODE_WORKERS    = max(1, cpu_count - 1)
 
 # ── Data ──────────────────────────────────────────────────────────────────────
@@ -82,7 +81,7 @@ def compute_perplexity(decoderLMmodel, data_loader):
 def generate(model, tokenizer, prompt, max_new_tokens=300, temperature=0.1):
     """Autoregressive sampling from the decoder."""
     model.eval()
-    token_ids = tokenizer.encode(prompt)
+    token_ids = tokenizer.encode_ids(prompt)
     x = torch.tensor(token_ids, dtype=torch.long, device=device).unsqueeze(0)
 
     for _ in range(max_new_tokens):
@@ -127,10 +126,10 @@ def load_data(data_dir=DATA_DIR, num_docs=NUM_DOCS):
     return ds
 
 def tokenize_batch(batch, tokenizer_path, eos_id):
-    tok = Tokenizer.load(tokenizer_path)
+    tok = Tokenizer.from_file(tokenizer_path)
     flat = []
     for text in batch["text"]:
-        ids = tok.encode(text)
+        ids = tok.encode_ids(text)
         ids.append(eos_id)
         flat.extend(ids)
     return {"ids": [flat]}
@@ -205,16 +204,19 @@ def main():
     print("Loading Tokenizer")
     tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
     if os.path.exists(tokenizer_path):
-        tokenizer = Tokenizer.load(tokenizer_path)
+        tokenizer = Tokenizer.from_file(tokenizer_path)
         print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
+        if tokenizer.loaded_from_legacy:
+            tokenizer.save(tokenizer_path)
+            print(f"Migrated legacy tokenizer to HF format at {tokenizer_path}")
     else:
         print("No saved tokenizer found, training a new one ...")
-        tokenizer = Tokenizer.train(
-            ds["text"],
+        tokenizer = Tokenizer()
+        trainer = Tokenizer.build_bpe_trainer(
             vocab_size=VOCAB_SIZE,
             special_tokens=SPECIAL_TOKENS,
-            num_workers=TOKENIZER_WORKERS,
         )
+        tokenizer.train_from_iterator(ds["text"], trainer=trainer, length=len(ds))
         os.makedirs("tokenizer", exist_ok=True)
         tokenizer.save(tokenizer_path)
         print(f"Tokenizer saved to {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
@@ -225,7 +227,9 @@ def main():
     os.makedirs(encoded_dir, exist_ok=True)
     encoded_path = os.path.join(encoded_dir, f"tokens_v{VOCAB_SIZE}_d{NUM_DOCS}.pt")
 
-    eos_id = tokenizer.bytes_to_id[b"<|endoftext|>"]
+    eos_id = tokenizer.token_to_id(SPECIAL_TOKENS[0])
+    if eos_id is None:
+        raise ValueError(f"Tokenizer is missing special token {SPECIAL_TOKENS[0]!r}")
     num_proc = max(1, min(ENCODE_WORKERS, len(ds)))
 
     if os.path.exists(encoded_path):
@@ -453,7 +457,6 @@ def main():
         "tokenizer": {
             "vocab_size": tokenizer.vocab_size,
             "special_tokens": SPECIAL_TOKENS,
-            "tokenizer_workers": TOKENIZER_WORKERS,
             "tokenizer_path": tokenizer_path,
         },
 
@@ -509,7 +512,6 @@ if __name__ == "__main__":
     parser.add_argument("--vocab_size",    type=int,   default=None)
     parser.add_argument("--token_budget",  type=int,   default=None)
     parser.add_argument("--learning_rate", type=float, default=None)
-    parser.add_argument("--tokenizer_workers", type=int, default=None)
     parser.add_argument("--encode_workers",    type=int, default=None)
     args = parser.parse_args()
 
@@ -524,7 +526,6 @@ if __name__ == "__main__":
     if args.vocab_size    is not None: VOCAB_SIZE    = args.vocab_size
     if args.token_budget  is not None: TOKEN_BUDGET  = args.token_budget
     if args.learning_rate is not None: learning_rate = args.learning_rate
-    if args.tokenizer_workers is not None: TOKENIZER_WORKERS = args.tokenizer_workers
     if args.encode_workers    is not None: ENCODE_WORKERS    = args.encode_workers
 
     main()

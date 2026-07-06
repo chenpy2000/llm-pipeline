@@ -1,403 +1,344 @@
-"""
-A BPE Tokenizer implementation.
+"""Hugging Face byte-level BPE tokenizer wrapper.
 
-Components:
-    PAT: Regex pattern for splitting text into chunks.
-    train: Class method to train a tokenizer on texts.
-    merge_pair: Static method to merge byte pairs during training.
-    encode: Convert text to a list of token IDs.
-    decode: Convert token IDs back to text.
-    save/load: Persist and restore a trained tokenizer.
-
-Usage:
-    tokenizer = Tokenizer.train(texts, vocab_size, special_tokens)
-    token_ids = tokenizer.encode(text)
-    decoded_text = tokenizer.decode(token_ids)
-    tokenizer.save(path)
-    tokenizer = Tokenizer.load(path)
+The project uses the public signatures from ``tokenizers.Tokenizer`` for the
+regular tokenizer operations, plus a few project helpers for ID-only encoding
+and default byte-level BPE training.
 """
 
-import heapq
-from multiprocessing import Process, Queue
-import regex as re
-from collections import Counter, defaultdict
+import json
 
-TOKEN_PATTERN = r"""'(?:[sdmt]|ll|ve|re)| ?\p{L}+| ?\p{N}+| ?[^\s\p{L}\p{N}]+|\s+(?!\S)|\s+"""
+from tokenizers import Tokenizer as HFTokenizer
+from tokenizers import decoders, models, pre_tokenizers, trainers
 
 
-def _chunk_sequence(sequence, chunk_count):
-    item_count = len(sequence)
-    if item_count == 0:
-        return []
-
-    chunk_count = max(1, min(chunk_count, item_count))
-    chunk_size = (item_count + chunk_count - 1) // chunk_count
-    return [sequence[i:i + chunk_size] for i in range(0, item_count, chunk_size)]
-
-
-def _resolve_worker_count(num_workers, item_count):
-    if num_workers is None or item_count <= 1:
-        return 1
-    return max(1, min(int(num_workers), item_count))
+def _new_byte_level_bpe_tokenizer():
+    tokenizer = HFTokenizer(models.BPE())
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
+        add_prefix_space=False,
+        use_regex=True,
+    )
+    tokenizer.decoder = decoders.ByteLevel()
+    return tokenizer
 
 
-def _count_text_chunk(texts):
-    data = Counter()
-    for text in texts:
-        for match in re.finditer(TOKEN_PATTERN, text):
-            elements = match.group().encode("utf-8")
-            token_tuple = tuple(bytes([b]) for b in elements)
-            data[token_tuple] += 1
-    return data
+def _byte_to_unicode():
+    byte_values = (
+        list(range(33, 127))
+        + list(range(161, 173))
+        + list(range(174, 256))
+    )
+    codepoints = byte_values[:]
+    next_codepoint = 0
+
+    for byte_value in range(256):
+        if byte_value not in byte_values:
+            byte_values.append(byte_value)
+            codepoints.append(256 + next_codepoint)
+            next_codepoint += 1
+
+    return dict(zip(byte_values, (chr(codepoint) for codepoint in codepoints)))
 
 
-def _count_pair_chunk(items):
-    pair_counts = Counter()
-    for token_tuple, count in items:
-        for i in range(len(token_tuple) - 1):
-            pair = (token_tuple[i], token_tuple[i + 1])
-            pair_counts[pair] += count
-    return pair_counts
+_BYTE_ENCODER = _byte_to_unicode()
 
 
-def _merge_pair_tokens(token_tuple, pair_to_merge, new_token, count):
-    deltas = defaultdict(int)
-    out = []
-    i = 0
-    while i < len(token_tuple):
-        if i < len(token_tuple) - 1 and (token_tuple[i], token_tuple[i + 1]) == pair_to_merge:
-            left = out[-1] if out else None
-            right = token_tuple[i + 2] if i + 2 < len(token_tuple) else None
+def _legacy_token_to_hf(raw_token, special_tokens):
+    for special_token in special_tokens:
+        if raw_token == special_token.encode("utf-8"):
+            return special_token
 
-            deltas[(token_tuple[i], token_tuple[i + 1])] -= count
-            if left is not None:
-                deltas[(left, token_tuple[i])] -= count
-                deltas[(left, new_token)] += count
-            if right is not None:
-                deltas[(token_tuple[i + 1], right)] -= count
-                deltas[(new_token, right)] += count
-
-            out.append(new_token)
-            i += 2
-        else:
-            out.append(token_tuple[i])
-            i += 1
-    return tuple(out), deltas
+    return "".join(_BYTE_ENCODER[byte_value] for byte_value in raw_token)
 
 
-def _tokenizer_train_worker(worker_id, texts, task_queue, result_queue):
-    data = _count_text_chunk(texts)
-    pair_counts = _count_pair_chunk(data.items())
-    result_queue.put(("ready", worker_id, pair_counts, len(data)))
+def _load_legacy_tokenizer(path, original_error):
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception:
+        raise original_error
 
-    while True:
-        task = task_queue.get()
-        if task is None:
-            break
+    if not {"vocab", "merges", "special_tokens"}.issubset(data):
+        raise original_error
 
-        best_pair, new_token = task
-        new_data = Counter()
-        total_deltas = Counter()
+    special_tokens = data["special_tokens"]
+    vocab = {
+        _legacy_token_to_hf(bytes.fromhex(hex_token), special_tokens): int(token_id)
+        for token_id, hex_token in data["vocab"].items()
+    }
+    merges = [
+        (
+            _legacy_token_to_hf(bytes.fromhex(left), special_tokens),
+            _legacy_token_to_hf(bytes.fromhex(right), special_tokens),
+        )
+        for left, right in data["merges"]
+    ]
 
-        for token_tuple, count in data.items():
-            new_token_tuple, deltas = _merge_pair_tokens(
-                token_tuple, best_pair, new_token, count
-            )
-            new_data[new_token_tuple] += count
-            total_deltas.update(deltas)
-
-        data = new_data
-        result_queue.put(("merged", worker_id, total_deltas, len(data)))
+    tokenizer = HFTokenizer(models.BPE(vocab=vocab, merges=merges, fuse_unk=False))
+    tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
+        add_prefix_space=False,
+        use_regex=True,
+    )
+    tokenizer.decoder = decoders.ByteLevel()
+    tokenizer.add_special_tokens(special_tokens)
+    return tokenizer
 
 
 class Tokenizer:
+    """Small project wrapper around ``tokenizers.Tokenizer``."""
 
-    # OpenAI's GPT tokenizer regex
-    # break text into chunks
-    PAT = TOKEN_PATTERN
+    def __init__(self, model=None):
+        self._loaded_from_legacy = False
 
-    def __init__(self, vocab, merges, special_tokens):
-        self.vocab = vocab                                      # dict[int, bytes]
-        self.merges = merges                                    # list[tuple[bytes, bytes]]
-        self.special_tokens = special_tokens                    # list[str]
-        self.merge_priority = {pair: i for i, pair in enumerate(self.merges)}
-        self.bytes_to_id = {v: k for k, v in vocab.items()}
-
-    @classmethod
-    def train(cls, texts, vocab_size, special_tokens, num_workers=1, progress_interval=1000):
-        """
-        Train a BPE tokenizer on the given texts.
-
-        Args:
-            list[str] texts: List of strings to train on.
-            int vocab_size: Target vocabulary size.
-            list[str] special_tokens: List of special token strings.
-            int num_workers: Number of worker processes for counting/update work.
-
-        Returns:
-            A trained Tokenizer instance.
-        """
-        text_count = len(texts)
-        worker_count = _resolve_worker_count(num_workers, text_count)
-
-        if worker_count > 1:
-            print(f"Training tokenizer with {worker_count} workers ...", flush=True)
-            return cls._train_parallel(
-                texts,
-                worker_count,
-                vocab_size,
-                special_tokens,
-                progress_interval,
+        if isinstance(model, HFTokenizer):
+            self._tokenizer = model
+        elif model is None:
+            self._tokenizer = _new_byte_level_bpe_tokenizer()
+        else:
+            self._tokenizer = HFTokenizer(model)
+            self._tokenizer.pre_tokenizer = pre_tokenizers.ByteLevel(
+                add_prefix_space=False,
+                use_regex=True,
             )
+            self._tokenizer.decoder = decoders.ByteLevel()
 
-        data = _count_text_chunk(texts)
-        pair_counts = _count_pair_chunk(list(data.items()))
+    @staticmethod
+    def from_file(path):
+        try:
+            return Tokenizer(HFTokenizer.from_file(path))
+        except Exception as exc:
+            tokenizer = Tokenizer(_load_legacy_tokenizer(path, exc))
+            tokenizer._loaded_from_legacy = True
+            return tokenizer
 
-        return cls._train_from_counts(
-            data,
-            pair_counts,
-            vocab_size,
-            special_tokens,
-            worker_count=1,
-            progress_interval=progress_interval,
+    @staticmethod
+    def from_str(json):
+        return Tokenizer(HFTokenizer.from_str(json))
+
+    @staticmethod
+    def from_buffer(buffer):
+        return Tokenizer(HFTokenizer.from_buffer(buffer))
+
+    @staticmethod
+    def from_pretrained(identifier, revision="main", token=None):
+        return Tokenizer(
+            HFTokenizer.from_pretrained(
+                identifier,
+                revision=revision,
+                token=token,
+            )
+        )
+
+    @staticmethod
+    def build_bpe_trainer(vocab_size=30000, special_tokens=None, show_progress=True):
+        return trainers.BpeTrainer(
+            vocab_size=vocab_size,
+            min_frequency=0,
+            show_progress=show_progress,
+            special_tokens=special_tokens or [],
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
         )
 
     @classmethod
-    def _train_parallel(
-        cls,
-        texts,
-        worker_count,
-        vocab_size,
-        special_tokens,
-        progress_interval,
-    ):
-        text_chunks = _chunk_sequence(texts, worker_count)
-        worker_count = len(text_chunks)
-        task_queues = [Queue() for _ in range(worker_count)]
-        result_queue = Queue()
-        processes = []
+    def load(cls, path):
+        return cls.from_file(path)
 
-        for worker_id, chunk in enumerate(text_chunks):
-            process = Process(
-                target=_tokenizer_train_worker,
-                args=(worker_id, chunk, task_queues[worker_id], result_queue),
-            )
-            process.start()
-            processes.append(process)
+    @property
+    def hf_tokenizer(self):
+        return self._tokenizer
 
-        del text_chunks
-
-        try:
-            pair_counts = Counter()
-            active_token_count = 0
-            for _ in processes:
-                message, _worker_id, chunk_counts, data_len = result_queue.get()
-                if message != "ready":
-                    raise RuntimeError(f"Unexpected tokenizer worker message: {message}")
-                pair_counts.update(chunk_counts)
-                active_token_count += data_len
-
-            return cls._train_from_counts(
-                data=None,
-                pair_counts=pair_counts,
-                vocab_size=vocab_size,
-                special_tokens=special_tokens,
-                task_queues=task_queues,
-                result_queue=result_queue,
-                worker_count=worker_count,
-                active_token_count=active_token_count,
-                progress_interval=progress_interval,
-            )
-        finally:
-            for task_queue in task_queues:
-                task_queue.put(None)
-
-            for process in processes:
-                process.join(timeout=5)
-                if process.is_alive():
-                    process.terminate()
-                    process.join()
-
-    @classmethod
-    def _train_from_counts(
-        cls,
-        data,
-        pair_counts,
-        vocab_size,
-        special_tokens,
-        task_queues=None,
-        result_queue=None,
-        worker_count=1,
-        active_token_count=None,
-        progress_interval=1000,
-    ):
-        """Finish BPE training after text and initial pair counts are built."""
-
-        vocab_elems = []
-        for token_str in special_tokens:
-            vocab_elems.append(token_str.encode("utf-8"))
-        vocab_elems += [bytes([i]) for i in range(256)]
-
-        merges = []
-        heap = [(-count, pair) for pair, count in pair_counts.items()]
-        heapq.heapify(heap)
-
-        while len(vocab_elems) < vocab_size:
-            #1, find the one with max number and break tie with lexicographical greater
-            while heap:
-                neg_count, best_pair = heapq.heappop(heap)
-                if best_pair in pair_counts and pair_counts[best_pair] == -neg_count:
-                    break
-            else:
-                break
-            merges.append(best_pair)
-
-            #2, append it at vocab_elements
-            new_token = best_pair[0] + best_pair[1]
-            vocab_elems.append(new_token)
-
-            #3, update the keys in data
-            if task_queues is not None:
-                total_deltas = Counter()
-                active_token_count = 0
-
-                for task_queue in task_queues:
-                    task_queue.put((best_pair, new_token))
-
-                for _ in range(worker_count):
-                    message, _worker_id, chunk_deltas, data_len = result_queue.get()
-                    if message != "merged":
-                        raise RuntimeError(f"Unexpected tokenizer worker message: {message}")
-                    total_deltas.update(chunk_deltas)
-                    active_token_count += data_len
-            else:
-                new_data = Counter()
-                total_deltas = Counter()
-
-                for token_tuple, count in data.items():
-                    # Create a new token tuple by merging the best_pair
-                    # (b'h', b'e', b'l', b'l', b'o') -> (b'h', b'e', b'll', b'o')
-                    new_token_tuple, deltas = cls.merge_pair(
-                        token_tuple, best_pair, new_token, count
-                    )
-                    new_data[new_token_tuple] += count
-                    total_deltas.update(deltas)
-
-            #4, update pair_counts with deltas
-            for p, d in total_deltas.items():
-                pair_counts[p] = pair_counts.get(p, 0) + d
-                if pair_counts[p] <= 0:
-                    pair_counts.pop(p, None)
-                else:
-                    heapq.heappush(heap, (-pair_counts[p], p))
-
-            # Replace old data with the newly merged data for the next loop
-            if task_queues is None:
-                data = new_data
-
-            if progress_interval and len(vocab_elems) % progress_interval == 0:
-                active_tokens = active_token_count if task_queues is not None else len(data)
-                print(
-                    f"  vocab {len(vocab_elems):,}/{vocab_size:,} | "
-                    f"active tokens {active_tokens:,} | pairs {len(pair_counts):,}",
-                    flush=True,
-                )
-
-        vocab = {i: token for i, token in enumerate(vocab_elems)}
-
-        return cls(vocab, merges, special_tokens)
-    
-    @staticmethod
-    def merge_pair(
-        token_tuple: tuple[bytes, ...],
-        pair_to_merge: tuple[bytes, bytes],
-        new_token: bytes,
-        count: int,
-    ) -> tuple[tuple[bytes, ...], dict[tuple[bytes, bytes], int]]:
-        """
-        Merge all occurrences of a pair in a token tuple.
-
-        Args:
-            token_tuple: Tuple of byte objects.
-            pair_to_merge: The pair of bytes to find and merge.
-            new_token: The merged bytes object.
-            count: Frequency count for delta tracking.
-
-        Returns:
-            (new_tuple, deltas): Updated tuple and pair frequency changes.
-
-        Example:
-            merge_pair((b'h', b'e', b'l', b'l', b'o'), (b'l', b'l'), b'll', 1)
-            Returns: ((b'h', b'e', b'll', b'o'), {...deltas...})
-        """
-
-        return _merge_pair_tokens(token_tuple, pair_to_merge, new_token, count)
-
-    def encode(self, text):
-        ids = []
-
-        # 1. Split on special tokens, keeping them in the result
-        special_pattern = '(' + '|'.join(re.escape(s) for s in self.special_tokens) + ')'
-        parts = re.split(special_pattern, text) if self.special_tokens else [text]
-
-        for part in parts:
-            if not part:
-                continue
-
-            # 2. If it's a special token, look up directly
-            if part in self.special_tokens:
-                ids.append(self.bytes_to_id[part.encode("utf-8")])
-                continue
-
-            # 3. Regex split into pre-tokens, then apply merges
-            for match in re.finditer(self.PAT, part):
-                token_tuple = tuple(bytes([b]) for b in match.group().encode("utf-8"))
-
-                # Repeatedly merge the highest-priority pair
-                while len(token_tuple) > 1:
-                    best_pair = None
-                    best_idx = float('inf')
-                    for i in range(len(token_tuple) - 1):
-                        pair = (token_tuple[i], token_tuple[i + 1])
-                        if pair in self.merge_priority and self.merge_priority[pair] < best_idx:
-                            best_idx = self.merge_priority[pair]
-                            best_pair = pair
-
-                    if best_pair is None:
-                        break
-
-                    new_token = best_pair[0] + best_pair[1]
-                    token_tuple, _ = self.merge_pair(token_tuple, best_pair, new_token, 1)
-
-                # Map each resulting bytes token to its ID
-                for token in token_tuple:
-                    ids.append(self.bytes_to_id[token])
-
-        return ids
-    
-    def decode(self, ids):
-        return b"".join(self.vocab[i] for i in ids).decode("utf-8", errors="replace")
-    
     @property
     def vocab_size(self):
-        return len(self.vocab)
+        return self.get_vocab_size()
 
-    def save(self, path):
-        import json
-        data = {
-            "vocab": {i: token.hex() for i, token in self.vocab.items()},
-            "merges": [(a.hex(), b.hex()) for a, b in self.merges],
-            "special_tokens": self.special_tokens,
-        }
-        with open(path, "w") as f:
-            json.dump(data, f)
+    @property
+    def loaded_from_legacy(self):
+        return self._loaded_from_legacy
 
-    @classmethod
-    def load(cls, path):
-        import json
-        with open(path, "r") as f:
-            data = json.load(f)
-        vocab = {int(i): bytes.fromhex(h) for i, h in data["vocab"].items()}
-        merges = [(bytes.fromhex(a), bytes.fromhex(b)) for a, b in data["merges"]]
-        special_tokens = data["special_tokens"]
-        return cls(vocab, merges, special_tokens)
+    @property
+    def model(self):
+        return self._tokenizer.model
+
+    @model.setter
+    def model(self, value):
+        self._tokenizer.model = value
+
+    @property
+    def normalizer(self):
+        return self._tokenizer.normalizer
+
+    @normalizer.setter
+    def normalizer(self, value):
+        self._tokenizer.normalizer = value
+
+    @property
+    def pre_tokenizer(self):
+        return self._tokenizer.pre_tokenizer
+
+    @pre_tokenizer.setter
+    def pre_tokenizer(self, value):
+        self._tokenizer.pre_tokenizer = value
+
+    @property
+    def post_processor(self):
+        return self._tokenizer.post_processor
+
+    @post_processor.setter
+    def post_processor(self, value):
+        self._tokenizer.post_processor = value
+
+    @property
+    def decoder(self):
+        return self._tokenizer.decoder
+
+    @decoder.setter
+    def decoder(self, value):
+        self._tokenizer.decoder = value
+
+    @property
+    def padding(self):
+        return self._tokenizer.padding
+
+    @property
+    def truncation(self):
+        return self._tokenizer.truncation
+
+    @property
+    def encode_special_tokens(self):
+        return self._tokenizer.encode_special_tokens
+
+    @encode_special_tokens.setter
+    def encode_special_tokens(self, value):
+        self._tokenizer.encode_special_tokens = value
+
+    def train(self, files, trainer=None):
+        return self._tokenizer.train(files, trainer=trainer)
+
+    def train_from_iterator(self, iterator, trainer=None, length=None):
+        return self._tokenizer.train_from_iterator(
+            iterator,
+            trainer=trainer,
+            length=length,
+        )
+
+    def encode(self, sequence, pair=None, is_pretokenized=False, add_special_tokens=True):
+        return self._tokenizer.encode(
+            sequence,
+            pair=pair,
+            is_pretokenized=is_pretokenized,
+            add_special_tokens=add_special_tokens,
+        )
+
+    def encode_batch(self, input, is_pretokenized=False, add_special_tokens=True):
+        return self._tokenizer.encode_batch(
+            input,
+            is_pretokenized=is_pretokenized,
+            add_special_tokens=add_special_tokens,
+        )
+
+    def encode_batch_fast(self, input, is_pretokenized=False, add_special_tokens=True):
+        return self._tokenizer.encode_batch_fast(
+            input,
+            is_pretokenized=is_pretokenized,
+            add_special_tokens=add_special_tokens,
+        )
+
+    def decode(self, ids, skip_special_tokens=True):
+        return self._tokenizer.decode(ids, skip_special_tokens=skip_special_tokens)
+
+    def decode_batch(self, sequences, skip_special_tokens=True):
+        return self._tokenizer.decode_batch(
+            sequences,
+            skip_special_tokens=skip_special_tokens,
+        )
+
+    def post_process(self, encoding, pair=None, add_special_tokens=True):
+        return self._tokenizer.post_process(
+            encoding,
+            pair=pair,
+            add_special_tokens=add_special_tokens,
+        )
+
+    def get_vocab(self, with_added_tokens=True):
+        return self._tokenizer.get_vocab(with_added_tokens=with_added_tokens)
+
+    def get_vocab_size(self, with_added_tokens=True):
+        return self._tokenizer.get_vocab_size(with_added_tokens=with_added_tokens)
+
+    def token_to_id(self, token):
+        return self._tokenizer.token_to_id(token)
+
+    def id_to_token(self, id):
+        return self._tokenizer.id_to_token(id)
+
+    def add_special_tokens(self, tokens):
+        return self._tokenizer.add_special_tokens(tokens)
+
+    def add_tokens(self, tokens):
+        return self._tokenizer.add_tokens(tokens)
+
+    def get_added_tokens_decoder(self):
+        return self._tokenizer.get_added_tokens_decoder()
+
+    def enable_padding(
+        self,
+        direction="right",
+        pad_id=0,
+        pad_type_id=0,
+        pad_token="[PAD]",
+        length=None,
+        pad_to_multiple_of=None,
+    ):
+        return self._tokenizer.enable_padding(
+            direction=direction,
+            pad_id=pad_id,
+            pad_type_id=pad_type_id,
+            pad_token=pad_token,
+            length=length,
+            pad_to_multiple_of=pad_to_multiple_of,
+        )
+
+    def no_padding(self):
+        return self._tokenizer.no_padding()
+
+    def enable_truncation(
+        self,
+        max_length,
+        stride=0,
+        strategy="longest_first",
+        direction="right",
+    ):
+        return self._tokenizer.enable_truncation(
+            max_length,
+            stride=stride,
+            strategy=strategy,
+            direction=direction,
+        )
+
+    def no_truncation(self):
+        return self._tokenizer.no_truncation()
+
+    def num_special_tokens_to_add(self, is_pair):
+        return self._tokenizer.num_special_tokens_to_add(is_pair)
+
+    def save(self, path, pretty=True):
+        return self._tokenizer.save(path, pretty=pretty)
+
+    def to_str(self, pretty=False):
+        return self._tokenizer.to_str(pretty=pretty)
+
+    def encode_ids(
+        self,
+        sequence,
+        pair=None,
+        is_pretokenized=False,
+        add_special_tokens=True,
+    ):
+        return self.encode(
+            sequence,
+            pair=pair,
+            is_pretokenized=is_pretokenized,
+            add_special_tokens=add_special_tokens,
+        ).ids
+
+    def __getattr__(self, name):
+        return getattr(self._tokenizer, name)

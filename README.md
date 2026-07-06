@@ -67,7 +67,11 @@ The reasons are:
 2. Even that lower-bound pre-training target requires about 7B tokens, which goes beyond what a personal computer can comfortably prepare, store, and feed through the current pipeline.
 3. Fragility has already appeared in the data-engineering layer of this PyTorch-grounded low-level project, so tokenizer, dataset, attention, and training infrastructure need framework support before larger runs.
 
-The framework changes will be listed below as they are selected and implemented. For the raw data pre-training reference, see the [`2_pretrain_raw` branch](https://github.com/chenpy2000/llm-pipeline/tree/2_pretrain_raw).
+Implemented replacement:
+
+- Tokenizer: replaced the raw regex plus `heapq` BPE tokenizer with a Hugging Face `tokenizers.Tokenizer` byte-level BPE wrapper. Existing legacy tokenizer JSON files can still be loaded, and new saves use the native HF tokenizer JSON format.
+
+The remaining framework changes will be listed below as they are selected and implemented. For the raw data pre-training reference, see the [`2_pretrain_raw` branch](https://github.com/chenpy2000/llm-pipeline/tree/2_pretrain_raw).
 
 ## Active Code
 
@@ -75,7 +79,7 @@ The framework changes will be listed below as they are selected and implemented.
 |---|---|
 | `main_pretrain.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
 | `transformer.py` | Decoder-only transformer model |
-| `tokenizer.py` | BPE tokenizer implementation |
+| `tokenizer.py` | Hugging Face Tokenizer byte-level BPE wrapper |
 | `dataset.py` | Causal language-modeling dataset |
 | `tokenizer/` | Saved tokenizer artifacts |
 | `chinchilla_curve.png` | Final pre-training scaling-law summary image |

@@ -12,7 +12,13 @@ from tqdm.auto import tqdm
 
 from dataset import HFCausalLMDataset
 from mix_dataset import build_or_load_mixed_tokenized_blocks
-from tokenizer import Tokenizer
+from tokenizer_config import (
+    DEFAULT_VOCAB_SIZE,
+    SPECIAL_TOKENS,
+    default_tokenizer_path,
+    load_required_tokenizer,
+    validate_checkpoint_vocab,
+)
 from transformer import Decoder
 
 
@@ -27,18 +33,16 @@ TOKENIZED_DATA_DIR = "./data/tokenized_cpt"
 RAW_PARQUET_DIR = "./data/raw_parquet_cpt"
 TOKENIZED_DATA_LABEL = None
 TOKENIZE_BATCH_SIZE = 500
-VOCAB_SIZE = 32768
-SPECIAL_TOKENS = ["<|endoftext|>"]
+VOCAB_SIZE = DEFAULT_VOCAB_SIZE
 VAL_TOKENS = 262_144
 CHECKPOINT_INTERVAL_TOKENS = 1_000_000_000
 CHECKPOINT_DIR = "./checkpoints/pretrain"
-CHECKPOINT_PREFIX = "qwen25_coder_05b"
+CHECKPOINT_PREFIX = "qwen25_coder_05b_v151936"
 
 # Set this to a checkpoint filename or path to start CPT from a specific model.
 # Examples:
-# CHECKPOINT_NAME = "qwen25_coder_05b_7b.pt"
-CHECKPOINT_NAME = "output/20260706_040426/model_20260706_040426.pt"
-# CHECKPOINT_NAME = None
+# CHECKPOINT_NAME = "qwen25_coder_05b_v151936_7b.pt"
+CHECKPOINT_NAME = None
 
 HF_TOKEN = None
 RESUME_TRAINING_STATE = False
@@ -132,7 +136,7 @@ CPT_SOURCES = [
         "config_name": "sample-10BT",
         "split": "train",
         "text_column": "text",
-        "token_budget": 300_000_000,
+        "token_budget": 7_000_000_000,
         "fim_rate": 0.0,
     },
 ]
@@ -140,7 +144,7 @@ TOKEN_BUDGET = sum(source["token_budget"] for source in CPT_SOURCES)
 
 # Model
 ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
-context_length = 1024
+context_length = 32768
 d_model = 896
 swiglu_d = 4864
 num_heads = 14
@@ -149,7 +153,7 @@ num_layers = 24
 rope_base = 1_000_000.0
 
 # Training
-batch_size = 16
+batch_size = 2
 learning_rate = 3e-4
 eval_interval = 1000
 training_dtype = torch.bfloat16
@@ -349,12 +353,12 @@ def main():
     print(f"Run output -> {run_dir}")
 
     print("Loading Tokenizer")
-    tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-    if not os.path.exists(tokenizer_path):
-        raise FileNotFoundError(
-            f"CPT expects an existing tokenizer at {tokenizer_path}. Run pretraining/tokenizer setup first."
-        )
-    tokenizer = Tokenizer.from_file(tokenizer_path)
+    tokenizer_path = default_tokenizer_path(VOCAB_SIZE)
+    tokenizer = load_required_tokenizer(
+        tokenizer_path=tokenizer_path,
+        expected_vocab_size=VOCAB_SIZE,
+        special_tokens=SPECIAL_TOKENS,
+    )
     print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
     num_proc = max(1, ENCODE_WORKERS)
@@ -473,6 +477,11 @@ def main():
 
     print(f"Loading model weights from {source_checkpoint_path} ...")
     checkpoint = torch.load(source_checkpoint_path, map_location=device)
+    validate_checkpoint_vocab(
+        checkpoint=checkpoint,
+        expected_vocab_size=tokenizer.vocab_size,
+        checkpoint_path=source_checkpoint_path,
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     if RESUME_TRAINING_STATE:
         if "optimizer_state_dict" in checkpoint:

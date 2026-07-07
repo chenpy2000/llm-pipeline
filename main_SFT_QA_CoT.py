@@ -29,6 +29,13 @@ from data_pipeline import (
     write_json_atomic,
 )
 from tokenizer import Tokenizer
+from tokenizer_config import (
+    DEFAULT_VOCAB_SIZE,
+    SPECIAL_TOKENS,
+    default_tokenizer_path,
+    load_required_tokenizer,
+    validate_checkpoint_vocab,
+)
 from transformer import Decoder
 
 
@@ -43,17 +50,15 @@ STAGE_NAME = "sft_qa_cot"
 TOKENIZED_DATA_DIR = "./data/tokenized_sft_qa_cot"
 TOKENIZED_DATA_LABEL = None
 TOKENIZED_SHARD_BLOCKS = 8192
-VOCAB_SIZE = 32768
-SPECIAL_TOKENS = ["<|endoftext|>"]
+VOCAB_SIZE = DEFAULT_VOCAB_SIZE
 VAL_TOKENS = 262_144
 CHECKPOINT_INTERVAL_TOKENS = 1_000_000_000
 CHECKPOINT_DIR = "./checkpoints/pretrain"
-CHECKPOINT_PREFIX = "qwen25_coder_05b"
+CHECKPOINT_PREFIX = "qwen25_coder_05b_v151936"
 
 # Set this to a checkpoint filename or path to start SFT from a specific model.
 # For the coding SFT run, pass the final QA/CoT SFT checkpoint with --checkpoint_name.
-CHECKPOINT_NAME = "output/20260706_040426/model_20260706_040426.pt"
-# CHECKPOINT_NAME = None
+CHECKPOINT_NAME = None
 
 HF_TOKEN = None
 RESUME_TRAINING_STATE = False
@@ -906,12 +911,12 @@ def main():
     print(f"Run output -> {run_dir}")
 
     print("Loading Tokenizer")
-    tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-    if not os.path.exists(tokenizer_path):
-        raise FileNotFoundError(
-            f"SFT expects an existing tokenizer at {tokenizer_path}. Run pretraining/tokenizer setup first."
-        )
-    tokenizer = Tokenizer.from_file(tokenizer_path)
+    tokenizer_path = default_tokenizer_path(VOCAB_SIZE)
+    tokenizer = load_required_tokenizer(
+        tokenizer_path=tokenizer_path,
+        expected_vocab_size=VOCAB_SIZE,
+        special_tokens=SPECIAL_TOKENS,
+    )
     print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
     token_blocks, data_manifest = build_or_load_mixed_sft_tokenized_blocks(
@@ -1027,6 +1032,11 @@ def main():
 
     print(f"Loading model weights from {source_checkpoint_path} ...")
     checkpoint = torch.load(source_checkpoint_path, map_location=device)
+    validate_checkpoint_vocab(
+        checkpoint=checkpoint,
+        expected_vocab_size=tokenizer.vocab_size,
+        checkpoint_path=source_checkpoint_path,
+    )
     model.load_state_dict(checkpoint["model_state_dict"])
     if RESUME_TRAINING_STATE:
         if "optimizer_state_dict" in checkpoint:

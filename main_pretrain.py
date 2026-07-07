@@ -11,8 +11,15 @@ from datetime import datetime
 from tqdm.auto import tqdm
 
 from tokenizer import Tokenizer
-from data_pipeline import build_or_load_tokenized_blocks, load_or_train_tokenizer
+from data_pipeline import build_or_load_tokenized_blocks
 from dataset import HFCausalLMDataset
+from tokenizer_config import (
+    DEFAULT_VOCAB_SIZE,
+    SPECIAL_TOKENS,
+    default_tokenizer_path,
+    load_required_tokenizer,
+    validate_checkpoint_vocab,
+)
 
 from transformer import Decoder
 
@@ -33,17 +40,16 @@ RAW_PARQUET_DIR    = "./data/raw_parquet"
 TOKENIZED_DATA_LABEL = None
 TOKENIZE_BATCH_SIZE  = 500
 NUM_DOCS       = 9_672_101  # Max documents in FineWeb-EDU sample-10BT.
-VOCAB_SIZE     = 32768
-SPECIAL_TOKENS = ["<|endoftext|>"]
+VOCAB_SIZE     = DEFAULT_VOCAB_SIZE
 TOKEN_BUDGET   = 7_000_000_000 # 0 = disabled (epoch mode), >0 = token-budget mode
-VAL_TOKENS     = 262_144    # 8 val batches at batch_size=32, context_length=1024.
+VAL_TOKENS     = 262_144    # validation token budget
 CHECKPOINT_INTERVAL_TOKENS = 1_000_000_000
 CHECKPOINT_DIR    = "./checkpoints/pretrain"
-CHECKPOINT_PREFIX = "qwen25_coder_05b"
+CHECKPOINT_PREFIX = "qwen25_coder_05b_v151936"
 
 # ── Model ─────────────────────────────────────────────────────────────────────
 ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
-context_length = 1024       # maximum sequence length
+context_length = 32768      # maximum sequence length
 d_model        = 896        # embedding dimension
 swiglu_d       = 4864       # SwiGLU hidden dimension
 num_heads      = 14         # number of attention heads
@@ -52,7 +58,7 @@ num_layers     = 24         # number of transformer layers
 rope_base      = 1_000_000.0
 
 # ── Training ──────────────────────────────────────────────────────────────────
-batch_size     = 16
+batch_size     = 2
 learning_rate  = 3e-4
 eval_interval  = 1000    # log every N steps
 training_dtype = torch.bfloat16
@@ -210,19 +216,13 @@ def main():
     print(f"Run output → {run_dir}")
 
     print("Loading Tokenizer")
-    tokenizer_path = f"tokenizer/tokenizer_{VOCAB_SIZE}.json"
-    tokenizer = load_or_train_tokenizer(
+    tokenizer_path = default_tokenizer_path(VOCAB_SIZE)
+    tokenizer = load_required_tokenizer(
         tokenizer_path=tokenizer_path,
-        vocab_size=VOCAB_SIZE,
+        expected_vocab_size=VOCAB_SIZE,
         special_tokens=SPECIAL_TOKENS,
-        dataset_id=DATASET_ID,
-        config_name=DATASET_CONFIG,
-        text_column=TEXT_COLUMN,
-        num_docs=NUM_DOCS,
-        raw_parquet_dir=RAW_PARQUET_DIR,
-        tokenized_root=TOKENIZED_DATA_DIR,
-        data_label=TOKENIZED_DATA_LABEL,
     )
+    print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
     # ── Encode (cached) ──────────────────────────────────────────────────────
 
@@ -330,6 +330,11 @@ def main():
         checkpoint_index, resume_checkpoint_path = resume_checkpoint
         print(f"Loading checkpoint {checkpoint_index}b from {resume_checkpoint_path} ...")
         checkpoint = torch.load(resume_checkpoint_path, map_location=device)
+        validate_checkpoint_vocab(
+            checkpoint=checkpoint,
+            expected_vocab_size=tokenizer.vocab_size,
+            checkpoint_path=resume_checkpoint_path,
+        )
         model.load_state_dict(checkpoint["model_state_dict"])
         optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         if "scheduler_state_dict" in checkpoint:

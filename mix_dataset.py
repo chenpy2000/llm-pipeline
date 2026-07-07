@@ -41,9 +41,9 @@ DEFAULT_TEXT_COLUMNS = (
     "title",
     "description",
 )
-FIM_PREFIX = "<fim_prefix>"
-FIM_SUFFIX = "<fim_suffix>"
-FIM_MIDDLE = "<fim_middle>"
+FIM_PREFIX = "<|fim_prefix|>"
+FIM_SUFFIX = "<|fim_suffix|>"
+FIM_MIDDLE = "<|fim_middle|>"
 SOFTWARE_HERITAGE_CONTENT_URL = "https://softwareheritage.s3.amazonaws.com/content/{blob_id}"
 
 

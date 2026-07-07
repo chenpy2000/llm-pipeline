@@ -177,7 +177,7 @@ TOKEN_BUDGET = sum(source["token_budget"] for source in SFT_SOURCES)
 
 # Model
 ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
-context_length = 1024
+context_length = 32768
 d_model = 896
 swiglu_d = 4864
 num_heads = 14

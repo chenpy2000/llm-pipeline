@@ -186,7 +186,7 @@ num_layers = 24
 rope_base = 1_000_000.0
 
 # Training
-batch_size = 16
+batch_size = 2
 learning_rate = 3e-4
 eval_interval = 1000
 training_dtype = torch.bfloat16

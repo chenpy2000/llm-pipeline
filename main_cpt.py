@@ -7,20 +7,20 @@ from datetime import datetime
 
 import torch
 from torch.optim.lr_scheduler import CosineAnnealingLR, LinearLR, SequentialLR
-from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
-from dataset import HFCausalLMDataset
-from mix_dataset import build_or_load_mixed_tokenized_blocks
-from tokenizer_config import (
-    DEFAULT_VOCAB_SIZE,
-    SPECIAL_TOKENS,
+from config import get_config_section, torch_dtype
+from main_tokenizer import (
     default_tokenizer_path,
     load_required_tokenizer,
     validate_checkpoint_vocab,
 )
+from dataset import build_causal_training_data
 from transformer import Decoder
 
+TOKENIZER_CONFIG = get_config_section("tokenizer")
+MODEL_CONFIG = get_config_section("model")
+TRAINING_CONFIG = get_config_section("training")
 
 # System
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -30,11 +30,12 @@ ENCODE_WORKERS = max(1, cpu_count - 1)
 
 # Data
 TOKENIZED_DATA_DIR = "./data/tokenized_cpt"
-RAW_PARQUET_DIR = "./data/raw_parquet_cpt"
+RAW_DATA_DIR = "./data/raw_parquet_cpt"
 TOKENIZED_DATA_LABEL = None
 TOKENIZE_BATCH_SIZE = 500
-VOCAB_SIZE = DEFAULT_VOCAB_SIZE
-VAL_TOKENS = 262_144
+VOCAB_SIZE = int(TOKENIZER_CONFIG["vocab_size"])
+SPECIAL_TOKENS = list(TOKENIZER_CONFIG["special_tokens"])
+VAL_TOKENS = int(TRAINING_CONFIG["val_tokens"])
 CHECKPOINT_INTERVAL_TOKENS = 1_000_000_000
 CHECKPOINT_DIR = "./checkpoints/pretrain"
 CHECKPOINT_PREFIX = "qwen25_coder_05b_v151936"
@@ -143,20 +144,20 @@ CPT_SOURCES = [
 TOKEN_BUDGET = sum(source["token_budget"] for source in CPT_SOURCES)
 
 # Model
-ARCHITECTURE_REFERENCE = "Qwen2.5-Coder-0.5B"
-context_length = 32768
-d_model = 896
-swiglu_d = 4864
-num_heads = 14
-num_key_value_heads = 2
-num_layers = 24
-rope_base = 1_000_000.0
+ARCHITECTURE_REFERENCE = MODEL_CONFIG["architecture_reference"]
+context_length = int(MODEL_CONFIG["context_length"])
+d_model = int(MODEL_CONFIG["d_model"])
+swiglu_d = int(MODEL_CONFIG["swiglu_d"])
+num_heads = int(MODEL_CONFIG["num_heads"])
+num_key_value_heads = int(MODEL_CONFIG["num_key_value_heads"])
+num_layers = int(MODEL_CONFIG["num_layers"])
+rope_base = float(MODEL_CONFIG["rope_base"])
 
 # Training
-batch_size = 2
-learning_rate = 3e-4
-eval_interval = 1000
-training_dtype = torch.bfloat16
+batch_size = int(TRAINING_CONFIG["batch_size"])
+learning_rate = float(TRAINING_CONFIG["learning_rate"])
+eval_interval = int(TRAINING_CONFIG["eval_interval"])
+training_dtype = torch_dtype(TRAINING_CONFIG["dtype"])
 use_mixed_precision = device.type == "cuda" and torch.cuda.is_bf16_supported()
 
 
@@ -362,7 +363,7 @@ def main():
     print(f"Loaded tokenizer from {tokenizer_path} (vocab size: {tokenizer.vocab_size})")
 
     num_proc = max(1, ENCODE_WORKERS)
-    token_blocks, data_manifest = build_or_load_mixed_tokenized_blocks(
+    training_data = build_causal_training_data(
         sources=CPT_SOURCES,
         tokenizer_path=tokenizer_path,
         tokenizer=tokenizer,
@@ -370,20 +371,22 @@ def main():
         special_tokens=SPECIAL_TOKENS,
         context_length=context_length,
         tokenized_root=TOKENIZED_DATA_DIR,
-        raw_data_dir=RAW_PARQUET_DIR,
+        raw_data_dir=RAW_DATA_DIR,
         data_label=TOKENIZED_DATA_LABEL,
+        val_tokens=VAL_TOKENS,
+        batch_size=batch_size,
+        device=device,
+        num_workers=num_workers,
         hf_token=HF_TOKEN,
         encode_workers=num_proc,
         tokenize_batch_size=TOKENIZE_BATCH_SIZE,
     )
+    data_manifest = training_data.data_manifest
+    train_dataset = training_data.train_dataset
+    val_dataset = training_data.val_dataset
+    val_loader = training_data.val_loader
+    total_tokens = training_data.total_tokens
 
-    block_dataset = HFCausalLMDataset(token_blocks, context_length)
-    if len(block_dataset) < 2:
-        raise ValueError("Need at least two token blocks to create train and val splits")
-    total_tokens = data_manifest["total_training_tokens"]
-    token_ids = range(total_tokens)
-
-    total_tokens = len(token_ids)
     print(f"Total tokens: {total_tokens:,}")
     print(f"Tokenized dataset label: {data_manifest['label']}")
     for source_info in data_manifest["sources"]:
@@ -392,25 +395,6 @@ def main():
             f"{source_info['blocks']:,} blocks, "
             f"{source_info['training_tokens']:,} training tokens"
         )
-
-    val_samples = max(1, VAL_TOKENS // context_length)
-    val_samples = min(val_samples, max(1, len(block_dataset) // 10))
-    val_samples = min(val_samples, len(block_dataset) - 1)
-    split = len(block_dataset) - val_samples
-    train_dataset = Subset(block_dataset, range(split))
-    val_dataset = Subset(block_dataset, range(split, len(block_dataset)))
-
-    loader_kwargs = {
-        "num_workers": num_workers,
-        "pin_memory": device.type == "cuda",
-        "persistent_workers": num_workers > 0,
-    }
-    val_loader = DataLoader(
-        val_dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        **loader_kwargs,
-    )
 
     print(f"Train: {len(train_dataset):,} samples, Val: {len(val_dataset):,} samples")
 
@@ -499,13 +483,7 @@ def main():
     start_sample = min(tokens_seen // context_length, len(train_dataset))
     if start_sample > 0:
         print(f"Skipping {start_sample:,} already-seen CPT training samples")
-    train_subset = Subset(train_dataset, range(start_sample, len(train_dataset)))
-    train_loader = DataLoader(
-        train_subset,
-        batch_size=batch_size,
-        shuffle=False,
-        **loader_kwargs,
-    )
+    train_loader = training_data.make_train_loader(start_sample=start_sample)
     next_checkpoint_index = tokens_seen // CHECKPOINT_INTERVAL_TOKENS + 1
 
     log_path = os.path.join(run_dir, f"training_log_{timestamp}.csv")
@@ -667,11 +645,11 @@ def main():
                 data_manifest["label"],
                 "manifest.json",
             ),
-            "raw_parquet_dir": RAW_PARQUET_DIR,
+            "raw_data_dir": RAW_DATA_DIR,
             "total_tokens": total_tokens,
             "train_samples": len(train_dataset),
             "val_samples": len(val_dataset),
-            "val_tokens": val_samples * context_length,
+            "val_tokens": training_data.val_samples * context_length,
             "sources": data_manifest["sources"],
             "encode_workers": num_proc,
             "tokenize_batch_size": TOKENIZE_BATCH_SIZE,
@@ -719,7 +697,7 @@ if __name__ == "__main__":
     parser.add_argument("--learning_rate", type=float, default=None)
     parser.add_argument("--encode_workers", type=int, default=None)
     parser.add_argument("--tokenized_data_dir", type=str, default=None)
-    parser.add_argument("--raw_parquet_dir", type=str, default=None)
+    parser.add_argument("--raw_data_dir", "--raw_parquet_dir", dest="raw_data_dir", type=str, default=None)
     parser.add_argument("--data_label", type=str, default=None)
     parser.add_argument("--tokenize_batch_size", type=int, default=None)
     parser.add_argument("--val_tokens", type=int, default=None)
@@ -757,8 +735,8 @@ if __name__ == "__main__":
         ENCODE_WORKERS = args.encode_workers
     if args.tokenized_data_dir is not None:
         TOKENIZED_DATA_DIR = args.tokenized_data_dir
-    if args.raw_parquet_dir is not None:
-        RAW_PARQUET_DIR = args.raw_parquet_dir
+    if args.raw_data_dir is not None:
+        RAW_DATA_DIR = args.raw_data_dir
     if args.data_label is not None:
         TOKENIZED_DATA_LABEL = args.data_label
     if args.tokenize_batch_size is not None:

@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import shutil
 import urllib.error
 import urllib.request
@@ -13,24 +14,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from datasets import concatenate_datasets, load_dataset
+from datasets import concatenate_datasets, load_dataset, load_from_disk
 from huggingface_hub import HfApi, hf_hub_download
 
-from data_pipeline import (
-    TOKENIZED_PIPELINE_VERSION,
-    TOKEN_BLOCK_COLUMN,
-    file_sha256,
-    fineweb_parquet_prefix,
-    get_worker_tokenizer,
-    load_tokenized_blocks,
-    manifest_is_complete,
-    sanitize_label,
-    tokenize_text_batch,
-    write_json_atomic,
-)
+from tokenizer import Tokenizer
 
 
+TOKENIZED_PIPELINE_VERSION = 1
 CPT_TOKENIZED_PIPELINE_VERSION = TOKENIZED_PIPELINE_VERSION
+TOKEN_BLOCK_COLUMN = "input_ids"
+_TOKENIZER_CACHE = {}
 DEFAULT_TEXT_COLUMNS = (
     "text",
     "content",
@@ -47,8 +40,122 @@ FIM_MIDDLE = "<|fim_middle|>"
 SOFTWARE_HERITAGE_CONTENT_URL = "https://softwareheritage.s3.amazonaws.com/content/{blob_id}"
 
 
+def file_sha256(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def write_json_atomic(path, data):
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.write("\n")
+    os.replace(tmp_path, path)
+
+
+def sanitize_label(value):
+    value = re.sub(r"[^A-Za-z0-9]+", "_", value)
+    value = re.sub(r"_+", "_", value)
+    value = value.strip("_")
+    return value or "dataset"
+
+
+def fineweb_parquet_prefix(config_name):
+    sample_match = re.fullmatch(r"sample-(.+)", config_name)
+    if sample_match:
+        return f"sample/{sample_match.group(1)}"
+    return f"data/{config_name}"
+
+
+def get_worker_tokenizer(tokenizer_path):
+    tokenizer = _TOKENIZER_CACHE.get(tokenizer_path)
+    if tokenizer is None:
+        tokenizer = Tokenizer.from_file(tokenizer_path)
+        _TOKENIZER_CACHE[tokenizer_path] = tokenizer
+    return tokenizer
+
+
+def tokenize_text_batch(batch, tokenizer_path, eos_id, context_length, text_column):
+    tokenizer = get_worker_tokenizer(tokenizer_path)
+    encodings = tokenizer.encode_batch_fast(batch[text_column])
+    flat_ids = []
+    for encoding in encodings:
+        flat_ids.extend(encoding.ids)
+        flat_ids.append(eos_id)
+
+    block_width = context_length + 1
+    usable_tokens = (len(flat_ids) // block_width) * block_width
+    blocks = [
+        flat_ids[start : start + block_width]
+        for start in range(0, usable_tokens, block_width)
+    ]
+    return {TOKEN_BLOCK_COLUMN: blocks}
+
+
+def load_tokenized_blocks(tokenized_path):
+    manifest_path = os.path.join(tokenized_path, "manifest.json")
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+
+    shards = []
+    for shard in manifest["shards"]:
+        shard_path = os.path.join(tokenized_path, shard["path"])
+        shards.append(load_from_disk(shard_path))
+
+    if not shards:
+        raise ValueError(f"No tokenized shards found in {tokenized_path}")
+
+    dataset = shards[0] if len(shards) == 1 else concatenate_datasets(shards)
+    return dataset.with_format("torch"), manifest
+
+
+def manifest_is_complete(tokenized_path, expected_label):
+    manifest_path = os.path.join(tokenized_path, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return False
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    if not manifest.get("completed"):
+        return False
+    if manifest.get("label") != expected_label:
+        return False
+    for shard in manifest.get("shards", []):
+        if not os.path.exists(os.path.join(tokenized_path, shard["path"])):
+            return False
+    return True
+
+
+def load_incomplete_manifest(tokenized_path, expected_label):
+    manifest_path = os.path.join(tokenized_path, "manifest.json")
+    if not os.path.exists(manifest_path):
+        return None
+    with open(manifest_path, "r", encoding="utf-8") as f:
+        manifest = json.load(f)
+    if manifest.get("completed"):
+        return None
+    if manifest.get("label") != expected_label:
+        return None
+
+    valid_shards = []
+    for shard in manifest.get("shards", []):
+        shard_path = os.path.join(tokenized_path, shard["path"])
+        if os.path.exists(shard_path):
+            valid_shards.append(shard)
+
+    total_blocks = sum(int(shard.get("blocks", 0)) for shard in valid_shards)
+    context_length = int(manifest.get("context_length", 0))
+    manifest["shards"] = valid_shards
+    manifest["docs_loaded"] = sum(int(shard.get("docs", 0)) for shard in valid_shards)
+    manifest["total_blocks"] = total_blocks
+    manifest["total_training_tokens"] = total_blocks * context_length
+    return manifest
+
+
 @dataclass(frozen=True)
-class CPTSource:
+class HFSource:
     label: str
     dataset_id: str
     token_budget: int
@@ -66,8 +173,8 @@ class CPTSource:
     load_kwargs: dict[str, Any] = field(default_factory=dict)
 
 
-def normalize_cpt_source(source: CPTSource | dict[str, Any]) -> CPTSource:
-    if isinstance(source, CPTSource):
+def normalize_hf_source(source: HFSource | dict[str, Any]) -> HFSource:
+    if isinstance(source, HFSource):
         return source
 
     source = dict(source)
@@ -88,7 +195,7 @@ def normalize_cpt_source(source: CPTSource | dict[str, Any]) -> CPTSource:
     else:
         source_files = tuple(source_files)
 
-    return CPTSource(
+    return HFSource(
         label=source["label"],
         dataset_id=source["dataset_id"],
         token_budget=int(source["token_budget"]),
@@ -111,7 +218,14 @@ def normalize_cpt_source(source: CPTSource | dict[str, Any]) -> CPTSource:
     )
 
 
-def source_to_manifest(source: CPTSource) -> dict[str, Any]:
+CPTSource = HFSource
+
+
+def normalize_cpt_source(source: HFSource | dict[str, Any]) -> HFSource:
+    return normalize_hf_source(source)
+
+
+def source_to_manifest(source: HFSource) -> dict[str, Any]:
     return {
         "label": source.label,
         "dataset_id": source.dataset_id,
@@ -131,8 +245,8 @@ def source_to_manifest(source: CPTSource) -> dict[str, Any]:
     }
 
 
-def default_cpt_mix_label(
-    sources: list[CPTSource],
+def default_mix_label(
+    sources: list[HFSource],
     vocab_size: int,
     context_length: int,
 ) -> str:
@@ -144,13 +258,17 @@ def default_cpt_mix_label(
     return sanitize_label(f"cpt_mix_{digest}_ctx{context_length}_v{vocab_size}")
 
 
-def cpt_source_cache_label(source: CPTSource, vocab_size: int, context_length: int) -> str:
+def source_cache_label(source: HFSource, vocab_size: int, context_length: int) -> str:
     digest = hashlib.sha1(
         json.dumps(source_to_manifest(source), sort_keys=True).encode("utf-8")
     ).hexdigest()[:8]
     return sanitize_label(
         f"{source.label}_{digest}_ctx{context_length}_v{vocab_size}"
     )
+
+
+default_cpt_mix_label = default_mix_label
+cpt_source_cache_label = source_cache_label
 
 
 def download_software_heritage_text(blob_id: str, timeout: int = 60) -> str:
@@ -185,7 +303,7 @@ def normalize_text_value(value: Any) -> str:
     return str(value)
 
 
-def extract_text(example: dict[str, Any], source: CPTSource) -> str:
+def extract_text(example: dict[str, Any], source: HFSource) -> str:
     if source.text_column and source.text_column in example:
         text = normalize_text_value(example[source.text_column])
         if text:
@@ -261,7 +379,7 @@ def ensure_prefix(value: str) -> str:
     return value.rstrip("/") + "/"
 
 
-def candidate_prefixes(source: CPTSource) -> list[str]:
+def candidate_prefixes(source: HFSource) -> list[str]:
     prefixes = []
     if source.file_prefix:
         prefixes.append(ensure_prefix(source.file_prefix))
@@ -294,7 +412,7 @@ def filter_files_by_split(files: list[str], split: str) -> list[str]:
     return matches or files
 
 
-def list_source_files(source: CPTSource, hf_token: str | None) -> list[str]:
+def list_source_files(source: HFSource, hf_token: str | None) -> list[str]:
     if source.source_files:
         return list(source.source_files)
 
@@ -339,7 +457,7 @@ def list_source_files(source: CPTSource, hf_token: str | None) -> list[str]:
 
 
 def download_raw_source_file(
-    source: CPTSource,
+    source: HFSource,
     source_file: str,
     raw_data_dir: str,
     hf_token: str | None,
@@ -384,7 +502,138 @@ def load_raw_source_dataset(
     )
 
 
-def can_use_pretrain_tokenizer_batch(source: CPTSource, column_names: list[str]) -> bool:
+def iter_source_texts(
+    source: HFSource | dict[str, Any],
+    raw_data_dir: str,
+    hf_token: str | None = None,
+    max_docs: int | None = None,
+    batch_size: int = 1000,
+    stats: dict[str, Any] | None = None,
+    apply_fim: bool = False,
+    cache_namespace: str = "text_iter",
+):
+    source = normalize_hf_source(source)
+    if max_docs is not None:
+        max_docs = int(max_docs)
+        if source.num_docs is not None:
+            max_docs = min(max_docs, source.num_docs)
+    else:
+        max_docs = source.num_docs
+    if max_docs is not None and max_docs <= 0:
+        return
+
+    source_files = list_source_files(source, hf_token=hf_token)
+    if stats is not None:
+        stats["source_files"] = source_files
+        stats.setdefault("files_visited", [])
+        stats.setdefault("docs_consumed", 0)
+        stats.setdefault("texts_yielded", 0)
+
+    docs_seen = 0
+    for source_index, source_file in enumerate(source_files):
+        if max_docs is not None and docs_seen >= max_docs:
+            break
+
+        local_file = None
+        ds = None
+        cache_dir = os.path.join(
+            raw_data_dir,
+            "_datasets_cache",
+            cache_namespace,
+            source.label,
+            f"source_{source_index:05d}",
+        )
+        try:
+            local_file = download_raw_source_file(
+                source=source,
+                source_file=source_file,
+                raw_data_dir=raw_data_dir,
+                hf_token=hf_token,
+            )
+            file_format = source.file_format or source_file_format(source_file)
+            ds = load_raw_source_dataset(
+                local_file=local_file,
+                file_format=file_format,
+                split=source.split,
+                cache_dir=cache_dir,
+            )
+            validate_source_columns(source, ds.column_names)
+
+            source_docs = len(ds)
+            docs_in_shard = source_docs
+            if max_docs is not None:
+                docs_in_shard = min(max_docs - docs_seen, source_docs)
+            if docs_in_shard < source_docs:
+                ds = ds.select(range(docs_in_shard))
+
+            shard_doc_start = docs_seen
+            docs_seen += len(ds)
+            if stats is not None:
+                stats["files_visited"].append(source_file)
+                stats["docs_consumed"] += len(ds)
+
+            batch_start = 0
+            for batch in ds.iter(batch_size=batch_size):
+                row_count = len(next(iter(batch.values()))) if batch else 0
+                for row_index in range(row_count):
+                    example = {
+                        column: values[row_index]
+                        for column, values in batch.items()
+                    }
+                    text = extract_text(example, source)
+                    if not text:
+                        continue
+                    doc_index = shard_doc_start + batch_start + row_index
+                    if apply_fim and should_apply_fim(source.fim_rate, doc_index):
+                        text = to_fim_text(text)
+                    if stats is not None:
+                        stats["texts_yielded"] += 1
+                    yield text
+                batch_start += row_count
+        finally:
+            ds = None
+            gc.collect()
+            cleanup_raw_source_shard(local_file, cache_dir)
+
+
+def iter_mixed_source_texts(
+    sources: list[HFSource | dict[str, Any]],
+    raw_data_dir: str,
+    hf_token: str | None = None,
+    max_docs_by_label: dict[str, int | None] | None = None,
+    default_max_docs: int | None = None,
+    batch_size: int = 1000,
+    stats_list: list[dict[str, Any]] | None = None,
+    apply_fim: bool = False,
+    cache_namespace: str = "text_iter",
+):
+    max_docs_by_label = max_docs_by_label or {}
+    for raw_source in sources:
+        source = normalize_hf_source(raw_source)
+        max_docs = max_docs_by_label.get(source.label, default_max_docs)
+        source_stats = {
+            **source_to_manifest(source),
+            "doc_cap": max_docs,
+            "source_files": [],
+            "files_visited": [],
+            "docs_consumed": 0,
+            "texts_yielded": 0,
+        }
+        if stats_list is not None:
+            stats_list.append(source_stats)
+        yield from iter_source_texts(
+            source=source,
+            raw_data_dir=raw_data_dir,
+            hf_token=hf_token,
+            max_docs=max_docs,
+            batch_size=batch_size,
+            stats=source_stats,
+            apply_fim=apply_fim,
+            cache_namespace=cache_namespace,
+        )
+
+
+def can_use_pretrain_tokenizer_batch(source: HFSource, column_names: list[str]) -> bool:
     return (
         source.text_column is not None
         and source.text_column in column_names
@@ -394,7 +643,7 @@ def can_use_pretrain_tokenizer_batch(source: CPTSource, column_names: list[str])
     )
 
 
-def validate_source_columns(source: CPTSource, column_names: list[str]) -> None:
+def validate_source_columns(source: HFSource, column_names: list[str]) -> None:
     candidates = []
     if source.text_column:
         candidates.append(source.text_column)
@@ -453,8 +702,8 @@ def tokenize_cpt_text_batch(
     return {TOKEN_BLOCK_COLUMN: blocks}
 
 
-def build_or_load_cpt_tokenized_source(
-    source: CPTSource | dict[str, Any],
+def build_or_load_tokenized_source(
+    source: HFSource | dict[str, Any],
     tokenizer_path: str,
     tokenizer,
     vocab_size: int,
@@ -466,25 +715,32 @@ def build_or_load_cpt_tokenized_source(
     encode_workers: int = 1,
     tokenize_batch_size: int = 500,
 ):
-    source = normalize_cpt_source(source)
-    label = cpt_source_cache_label(source, vocab_size, context_length)
+    source = normalize_hf_source(source)
+    label = source_cache_label(source, vocab_size, context_length)
     if manifest_is_complete(tokenized_path, label):
-        print(f"Loading tokenized CPT source '{label}' from {tokenized_path} ...")
+        print(f"Loading tokenized source '{label}' from {tokenized_path} ...")
         return load_tokenized_blocks(tokenized_path)
 
     eos_id = tokenizer.token_to_id(special_tokens[0])
     if eos_id is None:
         raise ValueError(f"Tokenizer is missing special token {special_tokens[0]!r}")
 
-    requested_blocks = max(1, math.ceil(source.token_budget / context_length))
+    requested_blocks = (
+        None
+        if source.token_budget <= 0
+        else max(1, math.ceil(source.token_budget / context_length))
+    )
     tokenizer_sha256 = file_sha256(tokenizer_path)
     source_files = list_source_files(source, hf_token=hf_token)
 
-    print(
-        f"Building tokenized CPT source '{label}' in {tokenized_path} "
-        f"({requested_blocks:,} target blocks, "
-        f"{requested_blocks * context_length:,} target training tokens) ..."
-    )
+    if requested_blocks is None:
+        print(f"Building tokenized source '{label}' in {tokenized_path} ...")
+    else:
+        print(
+            f"Building tokenized source '{label}' in {tokenized_path} "
+            f"({requested_blocks:,} target blocks, "
+            f"{requested_blocks * context_length:,} target training tokens) ..."
+        )
     os.makedirs(tokenized_path, exist_ok=True)
     shards_root = os.path.join(tokenized_path, "shards")
     os.makedirs(shards_root, exist_ok=True)
@@ -492,7 +748,7 @@ def build_or_load_cpt_tokenized_source(
 
     manifest = {
         "completed": False,
-        "pipeline_version": CPT_TOKENIZED_PIPELINE_VERSION,
+        "pipeline_version": TOKENIZED_PIPELINE_VERSION,
         "label": label,
         "source": source_to_manifest(source),
         "source_files": source_files,
@@ -503,21 +759,44 @@ def build_or_load_cpt_tokenized_source(
         "tokenizer_path": "tokenizer.json",
         "token_column": TOKEN_BLOCK_COLUMN,
         "requested_blocks": requested_blocks,
-        "requested_training_tokens": requested_blocks * context_length,
+        "requested_training_tokens": (
+            None if requested_blocks is None else requested_blocks * context_length
+        ),
         "docs_loaded": 0,
         "total_blocks": 0,
         "total_training_tokens": 0,
         "shards": [],
     }
+    partial_manifest = load_incomplete_manifest(tokenized_path, label)
+    if partial_manifest is not None:
+        manifest["docs_loaded"] = int(partial_manifest.get("docs_loaded", 0))
+        manifest["total_blocks"] = int(partial_manifest.get("total_blocks", 0))
+        manifest["total_training_tokens"] = int(
+            partial_manifest.get("total_training_tokens", 0)
+        )
+        manifest["shards"] = list(partial_manifest.get("shards", []))
+        if manifest["shards"]:
+            print(
+                f"Resuming tokenized source '{label}' with "
+                f"{len(manifest['shards']):,} saved shard(s)"
+            )
     write_json_atomic(os.path.join(tokenized_path, "manifest.json"), manifest)
 
-    docs_seen = 0
-    total_blocks = 0
+    processed_source_files = {
+        shard["source_file"]
+        for shard in manifest["shards"]
+        if shard.get("source_file") is not None
+    }
+    docs_seen = int(manifest["docs_loaded"])
+    total_blocks = int(manifest["total_blocks"])
     for source_index, source_file in enumerate(source_files):
-        if total_blocks >= requested_blocks:
+        if requested_blocks is not None and total_blocks >= requested_blocks:
             break
         if source.num_docs is not None and docs_seen >= source.num_docs:
             break
+        if source_file in processed_source_files:
+            print(f"Skipping already tokenized source shard {source_file}")
+            continue
 
         local_file = None
         ds = None
@@ -594,9 +873,10 @@ def build_or_load_cpt_tokenized_source(
                     desc=f"Tokenizing {Path(source_file).name}",
                 )
 
-            remaining_blocks = requested_blocks - total_blocks
-            if len(ds_tok) > remaining_blocks:
-                ds_tok = ds_tok.select(range(remaining_blocks))
+            if requested_blocks is not None:
+                remaining_blocks = requested_blocks - total_blocks
+                if len(ds_tok) > remaining_blocks:
+                    ds_tok = ds_tok.select(range(remaining_blocks))
 
             shard_blocks = len(ds_tok)
             if shard_blocks == 0:
@@ -635,15 +915,15 @@ def build_or_load_cpt_tokenized_source(
 
     if source.num_docs is not None and docs_seen < source.num_docs:
         print(f"Only found {docs_seen:,} docs for source '{source.label}'")
-    if total_blocks < requested_blocks:
+    if requested_blocks is not None and total_blocks < requested_blocks:
         print(
-            f"CPT source '{source.label}' exhausted at "
+            f"Source '{source.label}' exhausted at "
             f"{total_blocks * context_length:,} tokens before requested "
             f"{requested_blocks * context_length:,}"
         )
     if total_blocks == 0:
         raise ValueError(
-            f"CPT source {source.label!r} produced zero token blocks. "
+            f"Source {source.label!r} produced zero token blocks. "
             "Use more documents or a shorter context length."
         )
 
@@ -655,12 +935,16 @@ def build_or_load_cpt_tokenized_source(
     with open(os.path.join(tokenized_path, "label.txt"), "w", encoding="utf-8") as f:
         f.write(label + "\n")
 
-    print(f"Tokenized CPT source label: {label}")
+    print(f"Tokenized source label: {label}")
     return load_tokenized_blocks(tokenized_path)
 
 
+def build_or_load_cpt_tokenized_source(*args, **kwargs):
+    return build_or_load_tokenized_source(*args, **kwargs)
+
+
 def build_or_load_mixed_tokenized_blocks(
-    sources: list[CPTSource | dict[str, Any]],
+    sources: list[HFSource | dict[str, Any]],
     tokenizer_path: str,
     tokenizer,
     vocab_size: int,
@@ -673,14 +957,14 @@ def build_or_load_mixed_tokenized_blocks(
     encode_workers: int = 1,
     tokenize_batch_size: int = 500,
 ):
-    normalized_sources = [normalize_cpt_source(source) for source in sources]
+    normalized_sources = [normalize_hf_source(source) for source in sources]
     if not normalized_sources:
-        raise ValueError("At least one CPT source is required")
+        raise ValueError("At least one HF source is required")
 
     mix_label = (
         sanitize_label(data_label)
         if data_label
-        else default_cpt_mix_label(normalized_sources, vocab_size, context_length)
+        else default_mix_label(normalized_sources, vocab_size, context_length)
     )
     mix_root = os.path.join(tokenized_root, mix_label)
     sources_root = os.path.join(mix_root, "sources")
@@ -690,9 +974,9 @@ def build_or_load_mixed_tokenized_blocks(
     source_summaries = []
     total_blocks = 0
     for source in normalized_sources:
-        source_label = cpt_source_cache_label(source, vocab_size, context_length)
+        source_label = source_cache_label(source, vocab_size, context_length)
         source_path = os.path.join(sources_root, source_label)
-        token_blocks, source_manifest = build_or_load_cpt_tokenized_source(
+        token_blocks, source_manifest = build_or_load_tokenized_source(
             source=source,
             tokenizer_path=tokenizer_path,
             tokenizer=tokenizer,
@@ -729,7 +1013,7 @@ def build_or_load_mixed_tokenized_blocks(
         )
 
     if total_blocks < 2:
-        raise ValueError("Need at least two CPT token blocks to create train and val splits")
+        raise ValueError("Need at least two token blocks to create train and val splits")
 
     mixed_blocks = (
         tokenized_sources[0]
@@ -740,7 +1024,7 @@ def build_or_load_mixed_tokenized_blocks(
 
     manifest = {
         "completed": True,
-        "pipeline_version": CPT_TOKENIZED_PIPELINE_VERSION,
+        "pipeline_version": TOKENIZED_PIPELINE_VERSION,
         "label": mix_label,
         "vocab_size": vocab_size,
         "context_length": context_length,
@@ -756,7 +1040,7 @@ def build_or_load_mixed_tokenized_blocks(
         f.write(mix_label + "\n")
 
     print(
-        f"Created mixed CPT dataset '{mix_label}' at {mix_root}: "
+        f"Created mixed tokenized dataset '{mix_label}' at {mix_root}: "
         f"{len(mixed_blocks):,} blocks, "
         f"{len(mixed_blocks) * context_length:,} training tokens, "
         f"{len(source_summaries):,} sources"

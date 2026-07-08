@@ -78,7 +78,7 @@ The remaining framework changes will be listed below as they are selected and im
 | Path | Purpose |
 |---|---|
 | `main_pretrain.py` | Main pre-training, evaluation, checkpointing, and sample generation entry point |
-| `data_pipeline.py` | Raw Parquet download, tokenized shard cache, labels, and manifest loading |
+| `mix_dataset.py` | HF source lists, raw shard download, tokenized shard cache, source mixing, labels, manifests, and cleanup |
 | `transformer.py` | Decoder-only transformer model |
 | `tokenizer.py` | Hugging Face Tokenizer byte-level BPE wrapper |
 | `dataset.py` | Causal language-modeling dataset |
@@ -102,13 +102,13 @@ uv run main_pretrain.py
 
 The active pre-training data flow now uses portable tokenized shards:
 
-- raw FineWeb-EDU Parquet shards are downloaded one at a time into `data/raw_parquet/`;
+- raw HF dataset shards are downloaded one at a time into `data/raw_parquet/`;
 - each raw shard is tokenized locally with Hugging Face `datasets.map`;
-- the tokenized blocks are saved as HF `Dataset.save_to_disk` Arrow shards under `data/tokenized/<label>/`;
+- tokenized source blocks are saved as HF `Dataset.save_to_disk` Arrow shards under `data/tokenized/<label>/sources/<source-label>/`;
 - the raw Parquet file and per-shard processing cache are deleted after that shard is saved;
-- future runs load `data/tokenized/<label>/manifest.json` directly and skip the raw download.
+- future runs load completed source manifests directly and skip the raw download.
 
-The generated label is printed during startup and written to `label.txt` in the tokenized dataset folder. Labels use only letters, numbers, and underscores, for example `fineweb_edu_sample_10BT_train_docs9672101_ctx1024_v32768`. Copy the whole `data/tokenized/<label>/` folder, including `manifest.json`, `tokenizer.json`, and `shards/`, to an online drive if you want to reuse it elsewhere.
+The generated label is printed during startup and written to `label.txt` in the tokenized dataset folder. Labels use only letters, numbers, and underscores. Copy the whole `data/tokenized/<label>/` folder, including `manifest.json` and nested `sources/`, to an online drive if you want to reuse it elsewhere.
 
 Useful overrides:
 

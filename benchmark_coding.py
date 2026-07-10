@@ -27,6 +27,36 @@ NUM_KEY_VALUE_HEADS = 2
 NUM_LAYERS = 24
 ROPE_BASE = 1_000_000.0
 MAX_NEW_TOKENS = 256
+N_SHOT = 1
+PROMPT_TASK_IDS = (2, 3, 4)
+
+
+def format_mbpp_task(example):
+    """Use the task format from the MBPP evaluation protocol."""
+    tests = "\n".join(example["test_list"])
+    return (
+        "You are an expert Python programmer, and here is your task: "
+        f"{example['text']} Your code should pass these tests:\n\n"
+        f"{tests}\n[BEGIN]\n"
+    )
+
+
+def format_prompt(demonstrations, example):
+    """Render MBPP few-shot examples inside the ChatML format used for SFT."""
+    prompt = ""
+    for demonstration in demonstrations:
+        prompt += (
+            "<|im_start|>user\n"
+            f"{format_mbpp_task(demonstration)}"
+            "<|im_end|>\n<|im_start|>assistant\n"
+            f"{demonstration['code']}\n[DONE]<|im_end|>\n"
+        )
+    return (
+        prompt
+        + "<|im_start|>user\n"
+        + format_mbpp_task(example)
+        + "<|im_end|>\n<|im_start|>assistant\n"
+    )
 
 
 def main():
@@ -46,17 +76,15 @@ def main():
     model.eval()
 
     dataset = load_dataset("google-research-datasets/mbpp", "full", split="test")
+    prompt_dataset = load_dataset("google-research-datasets/mbpp", "full", split="prompt")
+    prompt_examples = {example["task_id"]: example for example in prompt_dataset}
+    demonstrations = [prompt_examples[task_id] for task_id in PROMPT_TASK_IDS[:N_SHOT]]
     passed = 0
     end_of_text_id = tokenizer.token_to_id("<|endoftext|>")
 
     with torch.inference_mode():
         for example in tqdm(dataset, desc="MBPP"):
-            prompt = (
-                "<|im_start|>user\n"
-                "Write a Python solution for this task. Return only executable Python code.\n\n"
-                f"{example['text']}"
-                "<|im_end|>\n<|im_start|>assistant\n"
-            )
+            prompt = format_prompt(demonstrations, example)
             input_ids = tokenizer.encode(prompt).ids
             generated_ids = []
             for _ in range(MAX_NEW_TOKENS):
@@ -66,10 +94,11 @@ def main():
                     break
                 input_ids.append(next_id)
                 generated_ids.append(next_id)
-                if tokenizer.decode(generated_ids).endswith("<|im_end|>"):
+                generated_text = tokenizer.decode(generated_ids)
+                if generated_text.endswith("[DONE]") or generated_text.endswith("<|im_end|>"):
                     break
 
-            code = tokenizer.decode(generated_ids).split("<|im_end|>", 1)[0]
+            code = tokenizer.decode(generated_ids).split("[DONE]", 1)[0].split("<|im_end|>", 1)[0]
             if "```" in code:
                 code = code.split("```", 2)[1].removeprefix("python").lstrip()
             script = "\n".join([example["test_setup_code"], code, *example["test_list"]])
